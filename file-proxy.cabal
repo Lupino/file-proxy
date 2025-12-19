@@ -1,0 +1,69 @@
+cabal-version: 1.12
+
+-- This file has been generated from package.yaml by hpack version 0.38.1.
+--
+-- see: https://github.com/sol/hpack
+
+name:           file-proxy
+version:        0.1.0.0
+description:    Please see the README on GitHub at <https://github.com/Lupino/file-proxy#readme>
+homepage:       https://github.com/Lupino/file-proxy#readme
+bug-reports:    https://github.com/Lupino/file-proxy/issues
+author:         Lupino
+maintainer:     lmjubuntu@gmail.com
+copyright:      MIT
+license:        BSD3
+license-file:   LICENSE
+build-type:     Simple
+extra-source-files:
+    README.md
+    ChangeLog.md
+
+source-repository head
+  type: git
+  location: https://github.com/Lupino/file-proxy
+
+library
+  exposed-modules:
+      Lib
+  other-modules:
+      Paths_file_proxy
+  hs-source-dirs:
+      src
+  build-depends:
+      base >=4.7 && <5
+    , bytestring
+    , directory
+    , filepath
+    , metro
+    , metro-socket
+    , optparse-applicative
+    , periodic-client
+    , periodic-common
+    , unliftio
+  default-language: Haskell2010
+
+executable file-proxy-exe
+  main-is: Main.hs
+  other-modules:
+      Paths_file_proxy
+  hs-source-dirs:
+      app
+  ghc-options: -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+      base >=4.7 && <5
+    , file-proxy
+  default-language: Haskell2010
+
+test-suite file-proxy-test
+  type: exitcode-stdio-1.0
+  main-is: Spec.hs
+  other-modules:
+      Paths_file_proxy
+  hs-source-dirs:
+      test
+  ghc-options: -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+      base >=4.7 && <5
+    , file-proxy
+  default-language: Haskell2010
