@@ -95,7 +95,7 @@ file-proxy-client upload ./big.bin remote/big.bin --chunk-size 1048576 --timeout
 
 The client computes the full-file SHA-256, begins or resumes the upload, sends chunks, and finishes only after server-side verification passes.
 
-Upload progress is written to stderr. The client prevents concurrent uploads to the same remote path on the same host with a lock under `/tmp/file-proxy-client-locks/`.
+Upload progress is written to stderr. The client prevents concurrent uploads to the same remote path on the same host with a lock under the system temporary directory.
 
 ## Large Downloads
 

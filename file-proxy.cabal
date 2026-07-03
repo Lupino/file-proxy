@@ -46,7 +46,6 @@ library
     , periodic-client
     , periodic-common
     , time
-    , unix
     , unliftio
   default-language: Haskell2010
 

@@ -40,16 +40,17 @@ import           Periodic.Trans.Client  (ClientT, open, openWithAuth, runClientT
 import           Periodic.Types         (ClientIdentity (ClientIdentity),
                                          Workload (Workload))
 import           System.Directory       (createDirectoryIfMissing,
+                                         createDirectory,
                                          doesDirectoryExist, doesFileExist,
-                                         doesPathExist,
                                          getDirectoryContents, getFileSize,
-                                         removeFile, renameFile)
+                                         getTemporaryDirectory,
+                                         removeDirectory, removeFile,
+                                         renameFile)
 import           System.Environment     (lookupEnv)
 import           System.Exit            (die)
 import           System.FilePath        (makeRelative, splitDirectories,
                                          takeDirectory, takeFileName, (</>))
 import qualified System.IO              as IO
-import           System.Posix.Files     (createNamedPipe)
 import           Text.Read              (readMaybe)
 import           UnliftIO.Exception     (finally)
 
@@ -608,20 +609,15 @@ uploadLockKey remote = "upload-" ++ sha256Bytes (B.pack remote)
 acquireNamedLock :: String -> String -> IO ()
 acquireNamedLock label lockPath = do
   createDirectoryIfMissing True $ takeDirectory lockPath
-  exists <- doesPathExist lockPath
-  if exists
-    then
+  acquired <- E.try (createDirectory lockPath) :: IO (Either E.IOException ())
+  case acquired of
+    Right () -> pure ()
+    Left _ ->
       die $ label ++ " is already in progress (lock: " ++ lockPath ++ ")"
-    else do
-      acquired <- E.try (createNamedPipe lockPath 0o600) :: IO (Either E.IOException ())
-      case acquired of
-        Right () -> pure ()
-        Left _ ->
-          die $ label ++ " is already in progress (lock: " ++ lockPath ++ ")"
 
 releaseNamedLock :: String -> IO ()
 releaseNamedLock lockPath = do
-  removed <- E.try (removeFile lockPath) :: IO (Either E.IOException ())
+  removed <- E.try (removeDirectory lockPath) :: IO (Either E.IOException ())
   case removed of
     Right () -> pure ()
     Left _ -> pure ()
@@ -638,11 +634,18 @@ withDownloadLock local clientAction = do
 
 acquireUploadLock :: FilePath -> IO ()
 acquireUploadLock remote = do
-  acquireNamedLock ("upload for remote path " ++ remote) ("/tmp" </> "file-proxy-client-locks" </> uploadLockKey remote)
+  lockPath <- uploadLockPath remote
+  acquireNamedLock ("upload for remote path " ++ remote) lockPath
 
 releaseUploadLock :: FilePath -> IO ()
 releaseUploadLock remote = do
-  releaseNamedLock $ "/tmp" </> "file-proxy-client-locks" </> uploadLockKey remote
+  lockPath <- uploadLockPath remote
+  releaseNamedLock lockPath
+
+uploadLockPath :: FilePath -> IO FilePath
+uploadLockPath remote = do
+  tmp <- getTemporaryDirectory
+  pure $ tmp </> "file-proxy-client-locks" </> uploadLockKey remote
 
 downloadLockPath :: FilePath -> FilePath
 downloadLockPath local = downloadPartPath local ++ ".lock"

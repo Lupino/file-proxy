@@ -98,7 +98,7 @@ file-proxy-client upload ./big.bin remote/big.bin --chunk-size 1048576 --timeout
 
 The client calls `upload-begin`, `upload-chunk`, and `upload-finish` internally. Chunk uploads remain idempotent when the same offset, size, and chunk SHA-256 are sent again. Conflicting overlapping chunks return `chunk_conflict`.
 
-Upload progress is rendered to stderr as a single-line progress bar. The client prevents concurrent uploads to the same remote path on the same host with a lock under `/tmp/file-proxy-client-locks/`. Use `--timeout` when sending large payloads.
+Upload progress is rendered to stderr as a single-line progress bar. The client prevents concurrent uploads to the same remote path on the same host with a lock under the system temporary directory. Use `--timeout` when sending large payloads.
 
 ## Resumable Download
 
