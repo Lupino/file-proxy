@@ -677,11 +677,13 @@ apiUploadBegin cfg raw begin@UploadBegin {..} = do
       if metaExists then do
         existing <- readJsonFile metaFile
         case existing of
-          Right existingMeta | existingMeta == meta -> toJSON <$> buildUploadStatus cfg existingMeta
+          Right existingMeta | existingMeta == meta -> do
+            repairUploadDataFile cfg uploadId dataFile beginSize
+            toJSON <$> buildUploadStatus cfg existingMeta
           Right _ -> pure $ err "upload_conflict" "existing upload metadata differs"
           Left msg -> pure $ err "invalid_upload_state" msg
       else do
-        BS.writeFile dataFile BS.empty
+        ensureUploadDataFile dataFile beginSize
         writeJsonFile metaFile meta
         writeJsonFile (chunksPath cfg uploadId) ([] :: [ChunkRecord])
         toJSON <$> buildUploadStatus cfg meta
@@ -721,6 +723,7 @@ apiUploadChunk cfg raw bs =
           let actualSha = sha256Bytes bs
               size = fromIntegral $ BS.length bs
           if actualSha /= expectedChunkSha then pure $ err "chunk_checksum_mismatch" "chunk sha256 does not match upload-chunk name"
+          else if size <= 0 then pure $ err "invalid_chunk_size" "chunk must not be empty"
           else if offset + size > metaSize then pure $ err "chunk_out_of_range" "chunk extends past expected upload size"
           else do
             chunks <- readChunks cfg uploadId
@@ -728,11 +731,17 @@ apiUploadChunk cfg raw bs =
               Just code -> pure $ err code "chunk overlaps existing uploaded data"
               Nothing -> do
                 let (_, _, dataFile) = uploadPaths cfg uploadId
-                IO.withBinaryFile dataFile IO.ReadWriteMode \h -> do
-                  IO.hSeek h IO.AbsoluteSeek offset
-                  BS.hPut h bs
-                let updated = ChunkRecord offset size actualSha : chunks
-                writeJsonFile (chunksPath cfg uploadId) updated
+                    hasRecord = any (sameChunk offset size actualSha) chunks
+                    end = offset + size
+                rangeExists <- uploadDataRangeExists dataFile end
+                let existing = hasRecord && rangeExists
+                unless existing do
+                  ensureUploadDataFile dataFile metaSize
+                  IO.withBinaryFile dataFile IO.ReadWriteMode \h -> do
+                    IO.hSeek h IO.AbsoluteSeek offset
+                    BS.hPut h bs
+                  let updated = if hasRecord then chunks else ChunkRecord offset size actualSha : chunks
+                  writeJsonFile (chunksPath cfg uploadId) updated
                 status <- buildUploadStatus cfg meta
                 pure $ toJSON $ UploadChunkResult status size actualSha offset
 
@@ -823,6 +832,36 @@ findChunkConflict offset size digest chunks =
     end = offset + size
     overlaps ChunkRecord {..} =
       offset < chunkOffset + chunkSize && chunkOffset < end
+
+sameChunk :: Integer -> Integer -> String -> ChunkRecord -> Bool
+sameChunk offset size digest ChunkRecord {..} =
+  chunkOffset == offset && chunkSize == size && chunkSha256 == digest
+
+ensureUploadDataFile :: FilePath -> Integer -> IO ()
+ensureUploadDataFile path size =
+  IO.withBinaryFile path IO.ReadWriteMode \h ->
+    IO.hSetFileSize h size
+
+repairUploadDataFile :: ApiConfig -> String -> FilePath -> Integer -> IO ()
+repairUploadDataFile cfg uploadId path size = do
+  chunks <- readChunks cfg uploadId
+  rangeExists <- uploadDataRangeExists path $ maxChunkEnd chunks
+  when (not rangeExists) $
+    writeJsonFile (chunksPath cfg uploadId) ([] :: [ChunkRecord])
+  ensureUploadDataFile path size
+
+uploadDataRangeExists :: FilePath -> Integer -> IO Bool
+uploadDataRangeExists path end = do
+  exists <- doesFileExist path
+  if not exists
+    then pure $ end == 0
+    else do
+      size <- getFileSize path
+      pure $ size >= end
+
+maxChunkEnd :: [ChunkRecord] -> Integer
+maxChunkEnd chunks =
+  maximum $ 0 : map (\ChunkRecord {..} -> chunkOffset + chunkSize) chunks
 
 mergeRanges :: [(Integer, Integer)] -> [(Integer, Integer)]
 mergeRanges =

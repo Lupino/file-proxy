@@ -6,15 +6,21 @@
 module FileProxy.Client
   ( clientMain
   , defaultChunkSize
+  , downloadMetaPath
   , downloadPartPath
+  , finishDownload
   , nextChunkSize
+  , prepareDownloadPart
+  , recordDownloadProgress
+  , writeDownloadChunk
   ) where
 
 import           Control.Monad          (when)
 import           Control.Monad.IO.Class (liftIO)
-import           Data.Aeson             (FromJSON, Value, eitherDecodeStrict',
-                                         encode, object, (.:), (.=))
-import           Data.Aeson.Types       (parseMaybe, withObject)
+import           Data.Aeson             (FromJSON (..), ToJSON (..), Value,
+                                         eitherDecodeStrict', encode, object,
+                                         withObject, (.:), (.=))
+import           Data.Aeson.Types       (parseMaybe)
 import qualified Data.ByteString        as BS
 import qualified Data.ByteString.Char8  as B
 import qualified Data.ByteString.Lazy   as LB
@@ -37,6 +43,25 @@ import           System.Exit            (die)
 import           System.FilePath        (takeDirectory)
 import qualified System.IO              as IO
 import           Text.Read              (readMaybe)
+
+data DownloadMeta = DownloadMeta
+  { downloadMetaSize       :: Integer
+  , downloadMetaSha256     :: String
+  , downloadMetaNextOffset :: Integer
+  }
+  deriving (Eq, Show)
+
+instance ToJSON DownloadMeta where
+  toJSON DownloadMeta {..} =
+    object
+      [ "size" .= downloadMetaSize
+      , "sha256" .= downloadMetaSha256
+      , "nextOffset" .= downloadMetaNextOffset
+      ]
+
+instance FromJSON DownloadMeta where
+  parseJSON = withObject "DownloadMeta" \o ->
+    DownloadMeta <$> o .: "size" <*> o .: "sha256" <*> o .: "nextOffset"
 
 data GlobalOptions = GlobalOptions
   { optHost           :: String
@@ -227,19 +252,22 @@ downloadFile remote local chunkSize timeoutSecs = do
   response <- liftClientIO $ decodeOkResponse infoBytes
   remoteSize <- liftClientIO $ requireField "size" response
   remoteSha <- liftClientIO $ requireField "sha256" response
-  partOffset <- liftClientIO $ prepareDownloadPart local remoteSize
-  loopDownload partOffset remoteSize
-  liftClientIO $ finishDownload local remoteSha
+  partOffset <- liftClientIO $ prepareDownloadPart local remoteSize remoteSha
+  loopDownload partOffset remoteSize remoteSha
+  liftClientIO $ finishDownload local remoteSize remoteSha
   liftClientIO $ LBC.putStrLn $ encode $ object ["ok" .= True, "path" .= remote, "local" .= local, "size" .= remoteSize, "sha256" .= remoteSha]
   where
-    loopDownload offset remoteSize
+    loopDownload offset remoteSize remoteSha
       | offset >= remoteSize = pure ()
       | otherwise = do
           let size = nextChunkSize chunkSize offset remoteSize
           chunk <- runRawJob "download-chunk" remote (jsonWorkload $ object ["offset" .= offset, "size" .= size]) timeoutSecs
           when (BS.null chunk) $ liftClientIO $ die "download returned an empty chunk before EOF"
-          liftClientIO $ BS.appendFile (downloadPartPath local) chunk
-          loopDownload (offset + fromIntegral (BS.length chunk)) remoteSize
+          let nextOffset = offset + fromIntegral (BS.length chunk)
+          liftClientIO $ do
+            writeDownloadChunk local offset chunk
+            recordDownloadProgress local remoteSize remoteSha nextOffset
+          loopDownload nextOffset remoteSize remoteSha
 
 runJsonJob :: Transport tp => String -> FilePath -> Workload -> Int -> ClientT tp IO BS.ByteString
 runJsonJob func job wl timeoutSecs = do
@@ -305,26 +333,93 @@ readFileChunk path offset size =
 downloadPartPath :: FilePath -> FilePath
 downloadPartPath path = path ++ ".part"
 
-prepareDownloadPart :: FilePath -> Integer -> IO Integer
-prepareDownloadPart local remoteSize = do
+downloadMetaPath :: FilePath -> FilePath
+downloadMetaPath path = downloadPartPath path ++ ".json"
+
+prepareDownloadPart :: FilePath -> Integer -> String -> IO Integer
+prepareDownloadPart local remoteSize remoteSha = do
   createDirectoryIfMissing True $ takeDirectory local
   let partPath = downloadPartPath local
-  exists <- doesFileExist partPath
-  if exists
-    then do
-      currentSize <- getFileSize partPath
-      when (currentSize > remoteSize) $ die "existing .part file is larger than the remote file"
-      pure currentSize
-    else pure 0
+      metaPath = downloadMetaPath local
+  meta <- readDownloadMeta metaPath
+  case meta of
+    Just DownloadMeta {..}
+      | downloadMetaSize == remoteSize
+      , downloadMetaSha256 == remoteSha
+      , 0 <= downloadMetaNextOffset
+      , downloadMetaNextOffset <= remoteSize -> do
+          completePart <- downloadPartHasSize partPath remoteSize
+          if completePart
+            then pure downloadMetaNextOffset
+            else resetDownloadPart partPath remoteSize >> pure 0
+    _ -> prepareLegacyDownloadPart partPath remoteSize remoteSha >>= \offset -> do
+      recordDownloadProgress local remoteSize remoteSha offset
+      pure offset
 
-finishDownload :: FilePath -> String -> IO ()
-finishDownload local expectedSha = do
+prepareLegacyDownloadPart :: FilePath -> Integer -> String -> IO Integer
+prepareLegacyDownloadPart partPath remoteSize remoteSha = do
+  exists <- doesFileExist partPath
+  offset <-
+    if exists
+      then do
+        currentSize <- getFileSize partPath
+        when (currentSize > remoteSize) $ die "existing .part file is larger than the remote file"
+        if currentSize == remoteSize
+          then do
+            actualSha <- sha256File partPath
+            pure $ if actualSha == remoteSha then remoteSize else 0
+          else pure currentSize
+      else pure 0
+  resetDownloadPart partPath remoteSize
+  pure offset
+
+resetDownloadPart :: FilePath -> Integer -> IO ()
+resetDownloadPart partPath remoteSize = do
+  exists <- doesFileExist partPath
+  when (not exists) $ BS.writeFile partPath BS.empty
+  IO.withBinaryFile partPath IO.ReadWriteMode \h ->
+    IO.hSetFileSize h remoteSize
+
+downloadPartHasSize :: FilePath -> Integer -> IO Bool
+downloadPartHasSize partPath remoteSize = do
+  exists <- doesFileExist partPath
+  if not exists
+    then pure False
+    else do
+      currentSize <- getFileSize partPath
+      pure $ currentSize == remoteSize
+
+writeDownloadChunk :: FilePath -> Integer -> BS.ByteString -> IO ()
+writeDownloadChunk local offset chunk =
+  IO.withBinaryFile (downloadPartPath local) IO.ReadWriteMode \h -> do
+    IO.hSeek h IO.AbsoluteSeek offset
+    BS.hPut h chunk
+
+recordDownloadProgress :: FilePath -> Integer -> String -> Integer -> IO ()
+recordDownloadProgress local remoteSize remoteSha nextOffset =
+  BS.writeFile (downloadMetaPath local) $ LB.toStrict $ encode $
+    DownloadMeta remoteSize remoteSha nextOffset
+
+readDownloadMeta :: FilePath -> IO (Maybe DownloadMeta)
+readDownloadMeta path = do
+  exists <- doesFileExist path
+  if exists
+    then either (const Nothing) Just . eitherDecodeStrict' <$> BS.readFile path
+    else pure Nothing
+
+finishDownload :: FilePath -> Integer -> String -> IO ()
+finishDownload local remoteSize expectedSha = do
   let partPath = downloadPartPath local
+      metaPath = downloadMetaPath local
   actualSha <- sha256File partPath
-  when (actualSha /= expectedSha) $ die "download checksum mismatch; leaving .part file in place"
+  when (actualSha /= expectedSha) do
+    recordDownloadProgress local remoteSize expectedSha 0
+    die "download checksum mismatch; leaving .part file in place"
   targetExists <- doesFileExist local
   when targetExists $ removeFile local
   renameFile partPath local
+  metaExists <- doesFileExist metaPath
+  when metaExists $ removeFile metaPath
 
 printBytesLn :: BS.ByteString -> IO ()
 printBytesLn bs = do
