@@ -8,7 +8,8 @@ import qualified Data.Aeson.Key       as Key
 import qualified Data.Aeson.KeyMap    as KeyMap
 import qualified Data.ByteString      as BS
 import qualified Data.Text            as Text
-import           Lib
+import           FileProxy.Client
+import           FileProxy.Worker
 import           System.Directory     (doesFileExist)
 import           System.FilePath      ((</>))
 import           System.IO.Temp       (withSystemTempDirectory)
@@ -55,6 +56,54 @@ main = hspec do
         assertOk rsp
         doesFileExist (cfgRoot cfg </> "remove.txt") `shouldReturn` False
 
+  describe "resumable download" do
+    it "returns download metadata for a file" do
+      withTestConfig False \cfg -> do
+        _ <- apiPutFile cfg "big/file.bin" "abcdef"
+        rsp <- apiDownloadInfo cfg "big/file.bin"
+        assertOk rsp
+        lookupField "size" rsp `shouldBe` Just (Number 6)
+        lookupField "sha256" rsp `shouldBe` Just (String $ Text.pack $ sha256Bytes "abcdef")
+
+    it "reads middle and final partial chunks" do
+      withTestConfig False \cfg -> do
+        _ <- apiPutFile cfg "big/file.bin" "abcdef"
+        middle <- apiDownloadChunk cfg "big/file.bin" (DownloadRange 2 3)
+        middle `shouldBe` Right "cde"
+
+        final <- apiDownloadChunk cfg "big/file.bin" (DownloadRange 4 8)
+        final `shouldBe` Right "ef"
+
+    it "rejects invalid download paths and ranges" do
+      withTestConfig False \cfg -> do
+        missing <- apiDownloadChunk cfg "missing.bin" (DownloadRange 0 3)
+        assertLeftError "not_found" missing
+
+        invalidPath <- apiDownloadChunk cfg "../secret.bin" (DownloadRange 0 3)
+        assertLeftError "invalid_path" invalidPath
+
+        _ <- apiPutFile cfg "file.bin" "abc"
+        negative <- apiDownloadChunk cfg "file.bin" (DownloadRange (-1) 1)
+        assertLeftError "invalid_range" negative
+
+        zero <- apiDownloadChunk cfg "file.bin" (DownloadRange 0 0)
+        assertLeftError "invalid_range" zero
+
+        pastEnd <- apiDownloadChunk cfg "file.bin" (DownloadRange 3 1)
+        assertLeftError "range_out_of_bounds" pastEnd
+
+    it "reconstructs a file from multiple chunks and verifies sha256" do
+      withTestConfig False \cfg -> do
+        let body = "abcdefghij"
+        _ <- apiPutFile cfg "remote.bin" body
+        first <- apiDownloadChunk cfg "remote.bin" (DownloadRange 0 4)
+        second <- apiDownloadChunk cfg "remote.bin" (DownloadRange 4 4)
+        third <- apiDownloadChunk cfg "remote.bin" (DownloadRange 8 4)
+
+        let reconstructed = mconcat [unwrapRight first, unwrapRight second, unwrapRight third]
+        reconstructed `shouldBe` body
+        sha256Bytes reconstructed `shouldBe` sha256Bytes body
+
   describe "resumable upload" do
     it "rejects invalid upload metadata" do
       withTestConfig False \cfg -> do
@@ -95,6 +144,16 @@ main = hspec do
         statusRsp <- apiUploadStatus cfg "../../target"
         assertError "invalid_upload_id" statusRsp
 
+  describe "client transfer helpers" do
+    it "calculates bounded chunk sizes" do
+      nextChunkSize defaultChunkSize 0 3 `shouldBe` 3
+      nextChunkSize 4 0 10 `shouldBe` 4
+      nextChunkSize 4 8 10 `shouldBe` 2
+      nextChunkSize 4 10 10 `shouldBe` 0
+
+    it "uses a stable partial download path" do
+      downloadPartPath "remote.bin" `shouldBe` "remote.bin.part"
+
 isLeft :: Either a b -> Bool
 isLeft (Left _) = True
 isLeft _        = False
@@ -116,3 +175,13 @@ assertError code rsp =
   case lookupField "error" rsp of
     Just errObj -> lookupField "code" errObj `shouldBe` Just (String $ Text.pack code)
     other -> expectationFailure $ "expected error object, got " ++ show other
+
+assertLeftError :: String -> Either ApiError BS.ByteString -> Expectation
+assertLeftError code rsp =
+  case rsp of
+    Left e -> errorCode e `shouldBe` code
+    Right bs -> expectationFailure $ "expected error " ++ code ++ ", got bytes " ++ show bs
+
+unwrapRight :: Either ApiError BS.ByteString -> BS.ByteString
+unwrapRight (Right bs) = bs
+unwrapRight (Left e)   = error $ "unexpected error: " ++ show e

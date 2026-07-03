@@ -1,11 +1,11 @@
 ---
 name: file-proxy
-description: Use file-proxy through the Periodic client. Trigger when Codex needs to call file-proxy worker functions with periodic run, including file operations, sha256sum, and resumable upload commands.
+description: Use file-proxy through file-proxy-client. Trigger when Codex needs to call file-proxy worker functions, including file operations, sha256sum, and resumable upload/download commands.
 ---
 
 # File Proxy Calls
 
-Use this skill only for calling an already running `file-proxy` worker through `periodic`.
+Use this skill only for calling an already running `file-proxy` worker through `file-proxy-client`.
 
 ## Response Format
 
@@ -21,88 +21,78 @@ or:
 {"ok":false,"error":{"code":"not_found","message":"path does not exist"}}
 ```
 
-`get-file` returns raw file bytes on success.
+`get` writes raw file bytes to the requested local path on success.
+
+For files larger than 1 MiB, do not use one-shot transfer commands:
+
+- Uploads larger than 1 MiB must use the resumable `upload-*` flow.
+- Downloads larger than 1 MiB must use the ranged `download-*` flow.
 
 ## File Operations
 
-Read a file:
+Read a file up to 1 MiB:
 
 ```bash
-periodic run get-file path/to/file.txt
+file-proxy-client get path/to/file.txt ./local-file
 ```
 
-Write a file:
+Write a file up to 1 MiB:
 
 ```bash
-periodic run put-file path/to/file.txt --workload @file-path --timeout 300
+file-proxy-client put ./local-file path/to/file.txt --timeout 300
 ```
 
 List a directory:
 
 ```bash
-periodic run get-directory path/to/dir
-periodic run get-directory path/to/dir --workload '{"recursive":true,"maxDepth":2}'
+file-proxy-client ls path/to/dir
+file-proxy-client ls path/to/dir --recursive --max-depth 2
 ```
 
 Get metadata or checksums:
 
 ```bash
-periodic run stat-path path/to/file.txt
-periodic run sha256sum path/to/file.txt
-periodic run sha256sum path/to/dir --workload '{"recursive":true}'
+file-proxy-client stat path/to/file.txt
+file-proxy-client sha256 path/to/file.txt
+file-proxy-client sha256 path/to/dir --recursive
 ```
 
 Manage paths:
 
 ```bash
-periodic run make-directory path/to/dir
-periodic run move-path old/name.txt --workload '{"to":"new/name.txt","overwrite":false}'
-periodic run copy-path src/name.txt --workload '{"to":"dst/name.txt","overwrite":false}'
-periodic run delete-path path/to/file.txt
-periodic run delete-path path/to/dir --workload '{"recursive":true}'
+file-proxy-client mkdir path/to/dir
+file-proxy-client mv old/name.txt new/name.txt
+file-proxy-client cp src/name.txt dst/name.txt
+file-proxy-client rm path/to/file.txt
+file-proxy-client rm path/to/dir --recursive
 ```
 
 `delete-path` only works when the worker was started with `--allow-delete` or `FILE_PROXY_ALLOW_DELETE=true`.
 
 ## Resumable Upload
 
-Use resumable upload for large files instead of a single `put-file`.
-
-Begin or resume:
+Use resumable upload for every file larger than 1 MiB instead of a single `put`.
 
 ```bash
-periodic run upload-begin remote/big.bin --workload '{"size":52428800,"sha256":"<full-file-sha256>","chunkSize":8388608}'
+file-proxy-client upload ./big.bin remote/big.bin --chunk-size 8388608 --timeout 300
 ```
 
-Upload a chunk:
+The client computes the full-file SHA-256, begins or resumes the upload, sends chunks, and finishes only after server-side verification passes.
+
+## Large Downloads
+
+Use a resumable/ranged download flow for every file larger than 1 MiB.
+
+Read metadata before downloading chunks:
 
 ```bash
-periodic run upload-chunk '<uploadId>/<offset>/<chunk-sha256>' --workload @chunk.bin --timeout 300
+file-proxy-client download remote/big.bin ./big.bin --chunk-size 8388608 --timeout 300
 ```
 
-Check status:
-
-```bash
-periodic run upload-status <uploadId>
-```
-
-Finish:
-
-```bash
-periodic run upload-finish <uploadId>
-```
-
-Abort:
-
-```bash
-periodic run upload-abort <uploadId>
-```
-
-Chunk uploads are idempotent when the same offset, size, and chunk SHA-256 are sent again. Conflicting overlapping chunks return `chunk_conflict`.
+The client writes to `./big.bin.part`, resumes from that partial file if present, and verifies SHA-256 before renaming it into place.
 
 ## Path Semantics
 
 - Job names are paths relative to the worker root.
 - Absolute paths, `..` traversal, and `.file-proxy` internals are rejected.
-- `@file-path` is read by the local `periodic` client and sent as workload bytes.
-- `periodic run` defaults to `--timeout 10`; set a larger timeout for `put-file` and `upload-chunk` with large payloads.
+- `file-proxy-client` defaults to `--timeout 300`; set a larger timeout for large payloads when needed.

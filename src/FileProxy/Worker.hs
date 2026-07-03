@@ -2,17 +2,21 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards   #-}
 
-module Lib
+module FileProxy.Worker
   ( ApiConfig (..)
+  , ApiError (..)
   , DeleteOptions (..)
   , FileEntry (..)
   , ListOptions (..)
+  , DownloadRange (..)
   , UploadBegin (..)
   , UploadChunkResult (..)
   , UploadFinishResult (..)
   , UploadMeta (..)
   , UploadStatus (..)
   , apiDeletePath
+  , apiDownloadChunk
+  , apiDownloadInfo
   , apiListDirectory
   , apiPutFile
   , apiSha256Sum
@@ -165,6 +169,8 @@ registerWorkers cfg thread = do
   void $ addFunc (fromString "delete-path") $ deletePath cfg
   void $ addFunc (fromString "move-path") $ movePath cfg
   void $ addFunc (fromString "copy-path") $ copyPath cfg
+  void $ addFunc (fromString "download-info") $ downloadInfo cfg
+  void $ addFunc (fromString "download-chunk") $ downloadChunk cfg
   void $ addFunc (fromString "upload-begin") $ uploadBegin cfg
   void $ addFunc (fromString "upload-chunk") $ uploadChunk cfg
   void $ addFunc (fromString "upload-status") $ uploadStatus cfg
@@ -255,6 +261,15 @@ instance FromJSON CopyOptions where
       <$> o .: "to"
       <*> fmap (fromMaybe False) (o .:? "overwrite")
       <*> fmap (fromMaybe False) (o .:? "recursive")
+
+data DownloadRange = DownloadRange
+  { downloadOffset :: Integer
+  , downloadSize   :: Integer
+  } deriving (Eq, Show)
+
+instance FromJSON DownloadRange where
+  parseJSON = withObject "DownloadRange" $ \o ->
+    DownloadRange <$> o .: "offset" <*> o .: "size"
 
 data UploadBegin = UploadBegin
   { beginSize      :: Integer
@@ -430,6 +445,42 @@ apiStatPath cfg raw = do
       pure $ case meta of
         Left e -> err (errorCode e) (errorMessage e)
         Right entry -> ok ["path" .= raw, "entry" .= entry]
+
+apiDownloadInfo :: ApiConfig -> FilePath -> IO Value
+apiDownloadInfo cfg raw = do
+  resolved <- safeResolve cfg raw
+  case resolved of
+    Left e -> pure $ err (errorCode e) (errorMessage e)
+    Right path -> do
+      isFile <- doesFileExist path
+      if not isFile then pure $ err "not_found" "file does not exist"
+      else do
+        size <- getFileSize path
+        digest <- sha256File path
+        modifiedAt <- getModificationTime path
+        pure $ ok ["path" .= raw, "size" .= size, "sha256" .= digest, "modifiedAt" .= modifiedAt]
+
+apiDownloadChunk :: ApiConfig -> FilePath -> DownloadRange -> IO (Either ApiError BS.ByteString)
+apiDownloadChunk cfg raw DownloadRange {..} = do
+  resolved <- safeResolve cfg raw
+  case resolved of
+    Left e -> pure $ Left e
+    Right path
+      | downloadOffset < 0 -> pure $ Left $ ApiError "invalid_range" "offset must be non-negative"
+      | downloadSize <= 0 -> pure $ Left $ ApiError "invalid_range" "size must be positive"
+      | downloadSize > fromIntegral (maxBound :: Int) -> pure $ Left $ ApiError "range_too_large" "size is too large"
+      | otherwise -> do
+        isFile <- doesFileExist path
+        if not isFile then pure $ Left $ ApiError "not_found" "file does not exist"
+        else do
+          fileSize <- getFileSize path
+          if downloadOffset >= fileSize then pure $ Left $ ApiError "range_out_of_bounds" "offset is past end of file"
+          else do
+            let available = fileSize - downloadOffset
+                bytesToRead = fromIntegral $ min downloadSize available
+            Right <$> IO.withBinaryFile path IO.ReadMode \h -> do
+              IO.hSeek h IO.AbsoluteSeek downloadOffset
+              BS.hGet h bytesToRead
 
 apiPutFile :: ApiConfig -> FilePath -> BS.ByteString -> IO Value
 apiPutFile cfg raw bs = do
@@ -827,6 +878,23 @@ statPath cfg = do
   raw <- name
   rsp <- liftIO $ apiStatPath cfg raw
   void $ workDone_ $ jsonValue rsp
+
+downloadInfo :: (Transport tp, MonadUnliftIO m) => ApiConfig -> JobT tp m ()
+downloadInfo cfg = do
+  raw <- name
+  rsp <- liftIO $ apiDownloadInfo cfg raw
+  void $ workDone_ $ jsonValue rsp
+
+downloadChunk :: (Transport tp, MonadUnliftIO m) => ApiConfig -> JobT tp m ()
+downloadChunk cfg = do
+  raw <- name
+  decoded <- decodeRequiredWorkload
+  rsp <- case decoded of
+    Left e -> pure $ Left $ ApiError "invalid_workload" e
+    Right rangeOpts -> liftIO $ apiDownloadChunk cfg raw rangeOpts
+  case rsp of
+    Left e -> liftIO $ ioError $ userError $ errorCode e ++ ": " ++ errorMessage e
+    Right bs -> void $ workDone_ bs
 
 sha256Sum :: (Transport tp, MonadUnliftIO m) => ApiConfig -> JobT tp m ()
 sha256Sum cfg = do

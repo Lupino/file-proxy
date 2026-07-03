@@ -24,6 +24,9 @@ dependencies:
 
 library:
   source-dirs: src
+  exposed-modules:
+  - FileProxy.Client
+  - FileProxy.Worker
   dependencies:
   - aeson
   - base16-bytestring
@@ -42,7 +45,16 @@ library:
 
 executables:
   file-proxy:
-    main:                Main.hs
+    main:                file-proxy-worker.hs
+    source-dirs:         app
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    dependencies:
+    - file-proxy
+  file-proxy-client:
+    main:                file-proxy-client.hs
     source-dirs:         app
     ghc-options:
     - -threaded

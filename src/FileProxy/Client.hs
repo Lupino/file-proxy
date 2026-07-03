@@ -1,0 +1,368 @@
+{-# LANGUAGE BlockArguments    #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RankNTypes        #-}
+{-# LANGUAGE RecordWildCards   #-}
+
+module FileProxy.Client
+  ( clientMain
+  , defaultChunkSize
+  , downloadPartPath
+  , nextChunkSize
+  ) where
+
+import           Control.Monad          (when)
+import           Control.Monad.IO.Class (liftIO)
+import           Data.Aeson             (FromJSON, Value, eitherDecodeStrict',
+                                         encode, object, (.:), (.=))
+import           Data.Aeson.Types       (parseMaybe, withObject)
+import qualified Data.ByteString        as BS
+import qualified Data.ByteString.Char8  as B
+import qualified Data.ByteString.Lazy   as LB
+import qualified Data.ByteString.Lazy.Char8 as LBC
+import           Data.Maybe             (fromMaybe)
+import           Data.String            (fromString)
+import           FileProxy.Worker       (sha256Bytes, sha256File)
+import           Metro.Class            (Transport)
+import qualified Metro.TP.RSA           as RSA (RSAMode (AES), configClient)
+import           Metro.TP.Socket        (socket)
+import           Options.Applicative
+import           Periodic.Trans.Client  (ClientT, open, openWithAuth, runClientT,
+                                         runJob)
+import           Periodic.Types         (ClientIdentity (ClientIdentity),
+                                         Workload (Workload))
+import           System.Directory       (createDirectoryIfMissing, doesFileExist,
+                                         getFileSize, removeFile, renameFile)
+import           System.Environment     (lookupEnv)
+import           System.Exit            (die)
+import           System.FilePath        (takeDirectory)
+import qualified System.IO              as IO
+import           Text.Read              (readMaybe)
+
+data GlobalOptions = GlobalOptions
+  { optHost           :: String
+  , optRsaPrivatePath :: FilePath
+  , optRsaPublicPath  :: FilePath
+  , optRsaMode        :: RSA.RSAMode
+  , optClientName     :: Maybe String
+  , optClientToken    :: Maybe String
+  , optCommand        :: Command
+  }
+
+data Command
+  = CmdGet FilePath FilePath Int
+  | CmdPut FilePath FilePath Int
+  | CmdList FilePath Bool (Maybe Int) Int
+  | CmdStat FilePath Int
+  | CmdSha256 FilePath Bool Int
+  | CmdMkdir FilePath Int
+  | CmdMove FilePath FilePath Bool Int
+  | CmdCopy FilePath FilePath Bool Bool Int
+  | CmdRemove FilePath Bool Int
+  | CmdUpload FilePath FilePath Int Int
+  | CmdDownload FilePath FilePath Int Int
+
+defaultChunkSize :: Int
+defaultChunkSize = 8 * 1024 * 1024
+
+clientMain :: IO ()
+clientMain = do
+  envHost <- lookupNonEmptyEnv "PERIODIC_PORT"
+  envRsaPrivate <- lookupNonEmptyEnv "PERIODIC_RSA_PRIVATE_PATH"
+  envRsaPublic <- lookupNonEmptyEnv "PERIODIC_RSA_PUBLIC_PATH"
+  envRsaMode <- lookupReadEnv "PERIODIC_RSA_MODE" >>= either die (pure . fromMaybe RSA.AES)
+  envClientName <- lookupNonEmptyEnv "PERIODIC_CLIENT_NAME"
+  envClientToken <- lookupNonEmptyEnv "PERIODIC_CLIENT_TOKEN"
+  opts <- execParser $ parserInfo envHost envRsaPrivate envRsaPublic envRsaMode envClientName envClientToken
+  validateHost $ optHost opts
+  runWithConnection opts $ processCommand $ optCommand opts
+
+parserInfo
+  :: Maybe String
+  -> Maybe FilePath
+  -> Maybe FilePath
+  -> RSA.RSAMode
+  -> Maybe String
+  -> Maybe String
+  -> ParserInfo GlobalOptions
+parserInfo envHost envRsaPrivate envRsaPublic envRsaMode envClientName envClientToken =
+  info (globalParser envHost envRsaPrivate envRsaPublic envRsaMode envClientName envClientToken <**> helper)
+    (fullDesc <> header "file-proxy-client - file-oriented client for a file-proxy worker")
+
+globalParser
+  :: Maybe String
+  -> Maybe FilePath
+  -> Maybe FilePath
+  -> RSA.RSAMode
+  -> Maybe String
+  -> Maybe String
+  -> Parser GlobalOptions
+globalParser envHost envRsaPrivate envRsaPublic envRsaMode envClientName envClientToken =
+  GlobalOptions
+    <$> strOption (long "host" <> short 'H' <> metavar "HOST" <> showDefault <> value (fromMaybe "unix:///tmp/periodic.sock" envHost) <> help "Periodic server address [$PERIODIC_PORT].")
+    <*> strOption (long "rsa-private-path" <> metavar "PATH" <> showDefault <> value (fromMaybe "" envRsaPrivate) <> help "RSA private key file path [$PERIODIC_RSA_PRIVATE_PATH].")
+    <*> strOption (long "rsa-public-path" <> metavar "PATH" <> showDefault <> value (fromMaybe "public_key.pem" envRsaPublic) <> help "RSA public key file or directory [$PERIODIC_RSA_PUBLIC_PATH].")
+    <*> option auto (long "rsa-mode" <> metavar "MODE" <> showDefault <> value envRsaMode <> help "RSA mode: Plain, RSA, or AES [$PERIODIC_RSA_MODE].")
+    <*> optional (strOption (long "client-name" <> metavar "NAME" <> value (fromMaybe "" envClientName) <> help "Auth client name [$PERIODIC_CLIENT_NAME]."))
+    <*> optional (strOption (long "client-token" <> metavar "TOKEN" <> value (fromMaybe "" envClientToken) <> help "Auth client token [$PERIODIC_CLIENT_TOKEN]."))
+    <*> commandParser
+
+commandParser :: Parser Command
+commandParser = hsubparser
+  ( command "get" (info (getParser <**> helper) (progDesc "Download one file with get-file"))
+ <> command "put" (info (putParser <**> helper) (progDesc "Upload one file with put-file"))
+ <> command "ls" (info (listParser <**> helper) (progDesc "List a remote directory"))
+ <> command "stat" (info (statParser <**> helper) (progDesc "Read remote path metadata"))
+ <> command "sha256" (info (sha256Parser <**> helper) (progDesc "Calculate remote SHA-256"))
+ <> command "mkdir" (info (mkdirParser <**> helper) (progDesc "Create a remote directory"))
+ <> command "mv" (info (moveParser <**> helper) (progDesc "Move a remote path"))
+ <> command "cp" (info (copyParser <**> helper) (progDesc "Copy a remote path"))
+ <> command "rm" (info (removeParser <**> helper) (progDesc "Delete a remote path"))
+ <> command "upload" (info (uploadParser <**> helper) (progDesc "Upload a file with resumable chunks"))
+ <> command "download" (info (downloadParser <**> helper) (progDesc "Download a file with resumable chunks"))
+  )
+
+getParser, putParser, listParser, statParser, sha256Parser, mkdirParser, moveParser, copyParser, removeParser, uploadParser, downloadParser :: Parser Command
+getParser = CmdGet <$> remoteArg <*> localArg <*> timeoutOpt
+putParser = CmdPut <$> localArg <*> remoteArg <*> timeoutOpt
+listParser = CmdList <$> remoteArg <*> recursiveOpt <*> optional (option auto (long "max-depth" <> metavar "N" <> help "Maximum recursive depth")) <*> timeoutOpt
+statParser = CmdStat <$> remoteArg <*> timeoutOpt
+sha256Parser = CmdSha256 <$> remoteArg <*> recursiveOpt <*> timeoutOpt
+mkdirParser = CmdMkdir <$> remoteArg <*> timeoutOpt
+moveParser = CmdMove <$> remoteArg <*> remoteArgTo <*> overwriteOpt <*> timeoutOpt
+copyParser = CmdCopy <$> remoteArg <*> remoteArgTo <*> overwriteOpt <*> recursiveOpt <*> timeoutOpt
+removeParser = CmdRemove <$> remoteArg <*> recursiveOpt <*> timeoutOpt
+uploadParser = CmdUpload <$> localArg <*> remoteArg <*> chunkSizeOpt <*> timeoutOpt
+downloadParser = CmdDownload <$> remoteArg <*> localArg <*> chunkSizeOpt <*> timeoutOpt
+
+remoteArg :: Parser FilePath
+remoteArg = strArgument (metavar "REMOTE")
+
+remoteArgTo :: Parser FilePath
+remoteArgTo = strArgument (metavar "TO")
+
+localArg :: Parser FilePath
+localArg = strArgument (metavar "LOCAL")
+
+recursiveOpt :: Parser Bool
+recursiveOpt = switch (long "recursive" <> short 'r' <> help "Enable recursive operation")
+
+overwriteOpt :: Parser Bool
+overwriteOpt = switch (long "overwrite" <> help "Overwrite an existing destination")
+
+chunkSizeOpt :: Parser Int
+chunkSizeOpt = option auto (long "chunk-size" <> metavar "BYTES" <> showDefault <> value defaultChunkSize <> help "Transfer chunk size")
+
+timeoutOpt :: Parser Int
+timeoutOpt = option auto (long "timeout" <> metavar "SECONDS" <> showDefault <> value 300 <> help "Periodic job timeout")
+
+runWithConnection :: GlobalOptions -> (forall tp. Transport tp => ClientT tp IO ()) -> IO ()
+runWithConnection GlobalOptions {..} clientAction = do
+  auth <- requireAuthPair optClientName optClientToken
+  if null optRsaPrivatePath
+    then do
+      clientEnv <- maybe (open (socket optHost)) (openWithAuth (socket optHost)) auth
+      runClientT clientEnv clientAction
+    else do
+      genTP <- RSA.configClient optRsaMode optRsaPrivatePath optRsaPublicPath
+      clientEnv <- maybe (open (genTP $ socket optHost)) (openWithAuth (genTP $ socket optHost)) auth
+      runClientT clientEnv clientAction
+
+processCommand :: Transport tp => Command -> ClientT tp IO ()
+processCommand (CmdGet remote local timeoutSecs) = do
+  bs <- runRawJob "get-file" remote emptyWorkload timeoutSecs
+  liftClientIO $ do
+    createDirectoryIfMissing True $ takeDirectory local
+    BS.writeFile local bs
+processCommand (CmdPut local remote timeoutSecs) = do
+  bs <- liftClientIO $ BS.readFile local
+  runJsonJob "put-file" remote (Workload bs) timeoutSecs >>= liftClientIO . printBytesLn
+processCommand (CmdList remote recursive maxDepth timeoutSecs) =
+  runJsonJob "get-directory" remote (jsonWorkload $ object ["recursive" .= recursive, "maxDepth" .= maxDepth]) timeoutSecs >>= liftClientIO . printBytesLn
+processCommand (CmdStat remote timeoutSecs) =
+  runJsonJob "stat-path" remote emptyWorkload timeoutSecs >>= liftClientIO . printBytesLn
+processCommand (CmdSha256 remote recursive timeoutSecs) =
+  runJsonJob "sha256sum" remote (jsonWorkload $ object ["recursive" .= recursive]) timeoutSecs >>= liftClientIO . printBytesLn
+processCommand (CmdMkdir remote timeoutSecs) =
+  runJsonJob "make-directory" remote emptyWorkload timeoutSecs >>= liftClientIO . printBytesLn
+processCommand (CmdMove from to overwrite timeoutSecs) =
+  runJsonJob "move-path" from (jsonWorkload $ object ["to" .= to, "overwrite" .= overwrite]) timeoutSecs >>= liftClientIO . printBytesLn
+processCommand (CmdCopy from to overwrite recursive timeoutSecs) =
+  runJsonJob "copy-path" from (jsonWorkload $ object ["to" .= to, "overwrite" .= overwrite, "recursive" .= recursive]) timeoutSecs >>= liftClientIO . printBytesLn
+processCommand (CmdRemove remote recursive timeoutSecs) =
+  runJsonJob "delete-path" remote (jsonWorkload $ object ["recursive" .= recursive]) timeoutSecs >>= liftClientIO . printBytesLn
+processCommand (CmdUpload local remote chunkSize timeoutSecs) =
+  uploadFile local remote chunkSize timeoutSecs
+processCommand (CmdDownload remote local chunkSize timeoutSecs) =
+  downloadFile remote local chunkSize timeoutSecs
+
+uploadFile :: Transport tp => FilePath -> FilePath -> Int -> Int -> ClientT tp IO ()
+uploadFile local remote chunkSize timeoutSecs = do
+  validateChunkSize chunkSize
+  fileSize <- liftClientIO $ getFileSize local
+  digest <- liftClientIO $ sha256File local
+  beginBytes <- runJsonJob "upload-begin" remote (jsonWorkload $ object ["size" .= fileSize, "sha256" .= digest, "chunkSize" .= chunkSize]) timeoutSecs
+  beginRsp <- liftClientIO $ decodeOkResponse beginBytes
+  uploadId <- liftClientIO $ requireField "uploadId" beginRsp
+  startOffset <- liftClientIO $ requireField "nextOffset" beginRsp
+  loopUpload uploadId startOffset fileSize
+  runJsonJob "upload-finish" uploadId emptyWorkload timeoutSecs >>= liftClientIO . printBytesLn
+  where
+    loopUpload uploadId offset fileSize
+      | offset >= fileSize = pure ()
+      | otherwise = do
+          let size = nextChunkSize chunkSize offset fileSize
+          chunk <- liftClientIO $ readFileChunk local offset size
+          let chunkDigest = sha256Bytes chunk
+              chunkName = uploadId <> "/" <> show offset <> "/" <> chunkDigest
+          chunkRspBytes <- runJsonJob "upload-chunk" chunkName (Workload chunk) timeoutSecs
+          chunkRsp <- liftClientIO $ decodeOkResponse chunkRspBytes
+          nextOffset <- liftClientIO $ requireField "nextOffset" chunkRsp
+          when (nextOffset <= offset) $ liftClientIO $ die "upload did not advance"
+          loopUpload uploadId nextOffset fileSize
+
+downloadFile :: Transport tp => FilePath -> FilePath -> Int -> Int -> ClientT tp IO ()
+downloadFile remote local chunkSize timeoutSecs = do
+  validateChunkSize chunkSize
+  infoBytes <- runJsonJob "download-info" remote emptyWorkload timeoutSecs
+  response <- liftClientIO $ decodeOkResponse infoBytes
+  remoteSize <- liftClientIO $ requireField "size" response
+  remoteSha <- liftClientIO $ requireField "sha256" response
+  partOffset <- liftClientIO $ prepareDownloadPart local remoteSize
+  loopDownload partOffset remoteSize
+  liftClientIO $ finishDownload local remoteSha
+  liftClientIO $ LBC.putStrLn $ encode $ object ["ok" .= True, "path" .= remote, "local" .= local, "size" .= remoteSize, "sha256" .= remoteSha]
+  where
+    loopDownload offset remoteSize
+      | offset >= remoteSize = pure ()
+      | otherwise = do
+          let size = nextChunkSize chunkSize offset remoteSize
+          chunk <- runRawJob "download-chunk" remote (jsonWorkload $ object ["offset" .= offset, "size" .= size]) timeoutSecs
+          when (BS.null chunk) $ liftClientIO $ die "download returned an empty chunk before EOF"
+          liftClientIO $ BS.appendFile (downloadPartPath local) chunk
+          loopDownload (offset + fromIntegral (BS.length chunk)) remoteSize
+
+runJsonJob :: Transport tp => String -> FilePath -> Workload -> Int -> ClientT tp IO BS.ByteString
+runJsonJob func job wl timeoutSecs = do
+  bs <- runRawJob func job wl timeoutSecs
+  _ <- liftClientIO $ decodeOkResponse bs
+  pure bs
+
+runRawJob :: Transport tp => String -> FilePath -> Workload -> Int -> ClientT tp IO BS.ByteString
+runRawJob func job wl timeoutSecs = do
+  result <- runJob (fromString func) (fromString job) wl timeoutSecs
+  case result of
+    Just bs -> pure bs
+    Nothing -> liftClientIO $ die $ "file-proxy worker function failed: " ++ func
+
+emptyWorkload :: Workload
+emptyWorkload = Workload BS.empty
+
+jsonWorkload :: Value -> Workload
+jsonWorkload = Workload . LB.toStrict . encode
+
+decodeOkResponse :: BS.ByteString -> IO Value
+decodeOkResponse bs =
+  case eitherDecodeStrict' bs of
+    Left e -> die $ "invalid JSON response: " ++ e
+    Right v -> do
+      okValue <- requireField "ok" v
+      if okValue
+        then pure v
+        else die $ formatApiError v
+
+requireField :: FromJSON a => String -> Value -> IO a
+requireField fieldName responseValue =
+  case fieldValue fieldName responseValue of
+    Just v  -> pure v
+    Nothing -> die $ "missing or invalid response field: " ++ fieldName
+
+fieldValue :: FromJSON a => String -> Value -> Maybe a
+fieldValue fieldName =
+  parseMaybe $ withObject "Response" \obj -> obj .: fromString fieldName
+
+formatApiError :: Value -> String
+formatApiError responseValue =
+  fromMaybe "request failed" do
+    errorValue <- fieldValue "error" responseValue
+    code <- fieldValue "code" errorValue
+    message <- fieldValue "message" errorValue
+    pure $ code ++ ": " ++ message
+
+validateChunkSize :: Int -> ClientT tp IO ()
+validateChunkSize size =
+  when (size <= 0) $ liftClientIO $ die "chunk size must be positive"
+
+nextChunkSize :: Int -> Integer -> Integer -> Integer
+nextChunkSize chunkSize offset total =
+  max 0 $ min (fromIntegral chunkSize) (total - offset)
+
+readFileChunk :: FilePath -> Integer -> Integer -> IO BS.ByteString
+readFileChunk path offset size =
+  IO.withBinaryFile path IO.ReadMode \h -> do
+    IO.hSeek h IO.AbsoluteSeek offset
+    BS.hGet h $ fromIntegral size
+
+downloadPartPath :: FilePath -> FilePath
+downloadPartPath path = path ++ ".part"
+
+prepareDownloadPart :: FilePath -> Integer -> IO Integer
+prepareDownloadPart local remoteSize = do
+  createDirectoryIfMissing True $ takeDirectory local
+  let partPath = downloadPartPath local
+  exists <- doesFileExist partPath
+  if exists
+    then do
+      currentSize <- getFileSize partPath
+      when (currentSize > remoteSize) $ die "existing .part file is larger than the remote file"
+      pure currentSize
+    else pure 0
+
+finishDownload :: FilePath -> String -> IO ()
+finishDownload local expectedSha = do
+  let partPath = downloadPartPath local
+  actualSha <- sha256File partPath
+  when (actualSha /= expectedSha) $ die "download checksum mismatch; leaving .part file in place"
+  targetExists <- doesFileExist local
+  when targetExists $ removeFile local
+  renameFile partPath local
+
+printBytesLn :: BS.ByteString -> IO ()
+printBytesLn bs = do
+  BS.hPut IO.stdout bs
+  IO.hPutChar IO.stdout '\n'
+
+liftClientIO :: IO a -> ClientT tp IO a
+liftClientIO = liftIO
+
+lookupNonEmptyEnv :: String -> IO (Maybe String)
+lookupNonEmptyEnv name = do
+  envValue <- lookupEnv name
+  pure $ case envValue of
+    Just "" -> Nothing
+    other   -> other
+
+lookupReadEnv :: Read a => String -> IO (Either String (Maybe a))
+lookupReadEnv name = do
+  envValue <- lookupNonEmptyEnv name
+  pure $ case envValue of
+    Nothing -> Right Nothing
+    Just raw ->
+      case readMaybe raw of
+        Just parsed -> Right $ Just parsed
+        Nothing     -> Left $ "Invalid value for $" ++ name ++ ": " ++ show raw
+
+requireAuthPair :: Maybe String -> Maybe String -> IO (Maybe ClientIdentity)
+requireAuthPair Nothing Nothing = pure Nothing
+requireAuthPair (Just "") (Just "") = pure Nothing
+requireAuthPair (Just name) (Just token)
+  | not (null name) && not (null token) = pure $ Just $ ClientIdentity (B.pack name) (B.pack token)
+  | otherwise = die "--client-name and --client-token must be provided together"
+requireAuthPair _ _ = die "--client-name and --client-token must be provided together"
+
+validateHost :: String -> IO ()
+validateHost host =
+  when (not ("tcp" `prefixOf` host) && not ("unix" `prefixOf` host)) $
+    die $ "invalid host: " ++ host
+
+prefixOf :: String -> String -> Bool
+prefixOf prefix input = take (length prefix) input == prefix

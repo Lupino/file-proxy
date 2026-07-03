@@ -1,6 +1,6 @@
 # file-proxy
 
-`file-proxy` is a Periodic worker that exposes file operations under a configured filesystem root.
+`file-proxy` is a Periodic worker that exposes file operations under a configured filesystem root. `file-proxy-client` is the file-oriented client for calling that worker without using `periodic run` directly.
 
 ## Build
 
@@ -12,6 +12,7 @@ Check CLI options:
 
 ```bash
 stack exec file-proxy -- --help
+stack exec file-proxy-client -- --help
 ```
 
 ## Run
@@ -61,18 +62,19 @@ or:
 ## File Functions
 
 ```bash
-periodic run get-file path/to/file.txt
-periodic run put-file path/to/file.txt --workload @local-file --timeout 300
-periodic run get-directory path/to/dir
-periodic run get-directory path/to/dir --workload '{"recursive":true,"maxDepth":2}'
-periodic run stat-path path/to/file.txt
-periodic run sha256sum path/to/file.txt
-periodic run sha256sum path/to/dir --workload '{"recursive":true}'
-periodic run make-directory path/to/dir
-periodic run move-path old/name.txt --workload '{"to":"new/name.txt","overwrite":false}'
-periodic run copy-path src/name.txt --workload '{"to":"dst/name.txt","overwrite":false}'
-periodic run delete-path path/to/file.txt
-periodic run delete-path path/to/dir --workload '{"recursive":true}'
+file-proxy-client get path/to/file.txt ./local-file
+file-proxy-client put ./local-file path/to/file.txt
+file-proxy-client ls path/to/dir
+file-proxy-client ls path/to/dir --recursive --max-depth 2
+file-proxy-client stat path/to/file.txt
+file-proxy-client sha256 path/to/file.txt
+file-proxy-client sha256 path/to/dir --recursive
+file-proxy-client download path/to/file.txt ./local-file
+file-proxy-client mkdir path/to/dir
+file-proxy-client mv old/name.txt new/name.txt --overwrite
+file-proxy-client cp src/name.txt dst/name.txt --overwrite
+file-proxy-client rm path/to/file.txt
+file-proxy-client rm path/to/dir --recursive
 ```
 
 Paths are relative to the worker root. Absolute paths, `..` traversal, and `.file-proxy` internals are rejected.
@@ -81,41 +83,22 @@ Paths are relative to the worker root. Absolute paths, `..` traversal, and `.fil
 
 ## Resumable Upload
 
-Use `upload-*` for large files. It stores temporary state under the worker root in `.file-proxy/uploads/` and publishes the target file only after the final SHA-256 matches.
-
-Start or resume a session:
+Use `upload` for large files. It stores temporary state under the worker root in `.file-proxy/uploads/` and publishes the target file only after the final SHA-256 matches.
 
 ```bash
-periodic run upload-begin remote/big.bin \
-  --workload '{"size":52428800,"sha256":"<full-file-sha256>","chunkSize":8388608}'
+file-proxy-client upload ./big.bin remote/big.bin --chunk-size 8388608 --timeout 300
 ```
 
-Upload chunks:
+The client calls `upload-begin`, `upload-chunk`, and `upload-finish` internally. Chunk uploads remain idempotent when the same offset, size, and chunk SHA-256 are sent again. Conflicting overlapping chunks return `chunk_conflict`.
+
+Use `--timeout` when sending large payloads.
+
+## Resumable Download
+
+Use `download` for large files. The client writes to `<local>.part`, resumes from that partial file if present, and verifies the completed local file against the server SHA-256 before renaming it into place.
 
 ```bash
-periodic run upload-chunk '<uploadId>/<offset>/<chunk-sha256>' \
-  --workload @chunk.bin \
-  --timeout 300
+file-proxy-client download remote/big.bin ./big.bin --chunk-size 8388608 --timeout 300
 ```
 
-Check progress:
-
-```bash
-periodic run upload-status <uploadId>
-```
-
-Finish and verify:
-
-```bash
-periodic run upload-finish <uploadId>
-```
-
-Abort:
-
-```bash
-periodic run upload-abort <uploadId>
-```
-
-Chunk uploads are idempotent when the same offset, size, and chunk SHA-256 are sent again. Conflicting overlapping chunks return `chunk_conflict`.
-
-`periodic run` defaults to `--timeout 10`. Set a larger timeout for `put-file` and `upload-chunk` when sending large payloads.
+The worker still serves `download-info` and `download-chunk` internally. `download-chunk` returns raw file bytes on success. If a requested range extends past EOF, it returns the remaining bytes. Offsets past EOF are rejected with `range_out_of_bounds`.
