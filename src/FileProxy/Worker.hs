@@ -123,7 +123,7 @@ flags mHost mClientName mClientToken mRsaPrivate mRsaPublic mRsaMode mAllowDelet
     <*> optional (strOption (long "client-name" <> metavar "NAME" <> value (fromMaybe "" mClientName) <> help "Auth client name [$PERIODIC_CLIENT_NAME]."))
     <*> optional (strOption (long "client-token" <> metavar "TOKEN" <> value (fromMaybe "" mClientToken) <> help "Auth client token [$PERIODIC_CLIENT_TOKEN]."))
     <*> switch (long "allow-delete" <> help "Allow delete-path to remove files and directories [$FILE_PROXY_ALLOW_DELETE].")
-    <*> strOption (long "prefix" <> metavar "PREFIX" <> showDefault <> value (fromMaybe "" mFuncPrefix) <> help "Prefix for registered worker function names [$FILE_PROXY_FUNC_PREFIX].")
+    <*> strOption (long "prefix" <> metavar "PREFIX" <> showDefault <> value (fromMaybe "" mFuncPrefix) <> help "Prefix for registered worker function names [$PERIODIC_FUNC_PREFIX].")
   where
     mkFlags hostPort rootPath workThread rsaPrivatePath rsaPublicPath rsaMode clientName clientToken cliAllowDelete funcPrefix =
       Flags
@@ -148,7 +148,7 @@ someFunc = do
   envRsaPublic <- lookupEnv "PERIODIC_RSA_PUBLIC_PATH"
   envRsaMode <- traverse readRsaMode =<< lookupEnv "PERIODIC_RSA_MODE"
   envAllowDelete <- fmap parseBool <$> lookupEnv "FILE_PROXY_ALLOW_DELETE"
-  envFuncPrefix <- lookupEnv "FILE_PROXY_FUNC_PREFIX"
+  envFuncPrefix <- lookupEnv "PERIODIC_FUNC_PREFIX"
 
   parsedFlags@Flags {..} <- execParser $ opts envHost envClientName envClientToken envRsaPrivate envRsaPublic envRsaMode envAllowDelete envFuncPrefix
   auth <- requireAuthPair parsedFlags

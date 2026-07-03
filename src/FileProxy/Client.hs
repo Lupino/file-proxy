@@ -9,17 +9,19 @@ module FileProxy.Client
   , downloadMetaPath
   , downloadPartPath
   , finishDownload
+  , isHiddenPath
   , nextChunkSize
   , prepareDownloadPart
   , recordDownloadProgress
   , writeDownloadChunk
   ) where
 
-import           Control.Monad          (when)
+import           Control.Monad          (forM, forM_, unless, when)
 import           Control.Monad.IO.Class (liftIO)
+import qualified Control.Exception      as E
 import           Data.Aeson             (FromJSON (..), ToJSON (..), Value,
                                          eitherDecodeStrict', encode, object,
-                                         withObject, (.:), (.=))
+                                         withObject, (.:), (.:?), (.=))
 import           Data.Aeson.Types       (parseMaybe)
 import qualified Data.ByteString        as BS
 import qualified Data.ByteString.Char8  as B
@@ -37,13 +39,19 @@ import           Periodic.Trans.Client  (ClientT, open, openWithAuth, runClientT
                                          runJob)
 import           Periodic.Types         (ClientIdentity (ClientIdentity),
                                          Workload (Workload))
-import           System.Directory       (createDirectoryIfMissing, doesFileExist,
-                                         getFileSize, removeFile, renameFile)
+import           System.Directory       (createDirectoryIfMissing,
+                                         doesDirectoryExist, doesFileExist,
+                                         doesPathExist,
+                                         getDirectoryContents, getFileSize,
+                                         removeFile, renameFile)
 import           System.Environment     (lookupEnv)
 import           System.Exit            (die)
-import           System.FilePath        (takeDirectory)
+import           System.FilePath        (makeRelative, splitDirectories,
+                                         takeDirectory, takeFileName, (</>))
 import qualified System.IO              as IO
+import           System.Posix.Files     (createNamedPipe)
 import           Text.Read              (readMaybe)
+import           UnliftIO.Exception     (finally)
 
 data DownloadMeta = DownloadMeta
   { downloadMetaSize       :: Integer
@@ -87,6 +95,25 @@ data Command
   | CmdRemove FilePath Bool Int
   | CmdUpload FilePath FilePath Int Int
   | CmdDownload FilePath FilePath Int Int
+  | CmdUploadDir FilePath FilePath Bool Int Int
+  | CmdDownloadDir FilePath FilePath Bool Int Int
+
+data RemoteEntry = RemoteEntry
+  { remoteEntryPath     :: FilePath
+  , remoteEntryType     :: String
+  , remoteEntrySize     :: Maybe Integer
+  , remoteEntrySha256   :: Maybe String
+  , remoteEntryChildren :: Maybe [RemoteEntry]
+  } deriving (Eq, Show)
+
+instance FromJSON RemoteEntry where
+  parseJSON = withObject "RemoteEntry" \o ->
+    RemoteEntry
+      <$> o .: "path"
+      <*> o .: "type"
+      <*> o .:? "size"
+      <*> o .:? "sha256"
+      <*> o .:? "children"
 
 defaultChunkSize :: Int
 defaultChunkSize = 1024 * 1024
@@ -99,7 +126,7 @@ clientMain = do
   envRsaMode <- lookupReadEnv "PERIODIC_RSA_MODE" >>= either die (pure . fromMaybe RSA.AES)
   envClientName <- lookupNonEmptyEnv "PERIODIC_CLIENT_NAME"
   envClientToken <- lookupNonEmptyEnv "PERIODIC_CLIENT_TOKEN"
-  envFuncPrefix <- lookupNonEmptyEnv "FILE_PROXY_FUNC_PREFIX"
+  envFuncPrefix <- lookupNonEmptyEnv "PERIODIC_FUNC_PREFIX"
   opts <- execParser $ parserInfo envHost envRsaPrivate envRsaPublic envRsaMode envClientName envClientToken envFuncPrefix
   validateHost $ optHost opts
   runWithConnection opts $ processCommand (optFuncPrefix opts) $ optCommand opts
@@ -134,7 +161,7 @@ globalParser envHost envRsaPrivate envRsaPublic envRsaMode envClientName envClie
     <*> option auto (long "rsa-mode" <> metavar "MODE" <> showDefault <> value envRsaMode <> help "RSA mode: Plain, RSA, or AES [$PERIODIC_RSA_MODE].")
     <*> optional (strOption (long "client-name" <> metavar "NAME" <> value (fromMaybe "" envClientName) <> help "Auth client name [$PERIODIC_CLIENT_NAME]."))
     <*> optional (strOption (long "client-token" <> metavar "TOKEN" <> value (fromMaybe "" envClientToken) <> help "Auth client token [$PERIODIC_CLIENT_TOKEN]."))
-    <*> strOption (long "prefix" <> metavar "PREFIX" <> showDefault <> value (fromMaybe "" envFuncPrefix) <> help "Prefix for worker function names [$FILE_PROXY_FUNC_PREFIX].")
+    <*> strOption (long "prefix" <> metavar "PREFIX" <> showDefault <> value (fromMaybe "" envFuncPrefix) <> help "Prefix for worker function names [$PERIODIC_FUNC_PREFIX].")
     <*> commandParser
 
 commandParser :: Parser Command
@@ -150,9 +177,11 @@ commandParser = hsubparser
  <> command "rm" (info (removeParser <**> helper) (progDesc "Delete a remote path"))
  <> command "upload" (info (uploadParser <**> helper) (progDesc "Upload a file with resumable chunks"))
  <> command "download" (info (downloadParser <**> helper) (progDesc "Download a file with resumable chunks"))
+ <> command "upload-dir" (info (uploadDirParser <**> helper) (progDesc "Upload a local directory"))
+ <> command "download-dir" (info (downloadDirParser <**> helper) (progDesc "Download a remote directory"))
   )
 
-getParser, putParser, listParser, statParser, sha256Parser, mkdirParser, moveParser, copyParser, removeParser, uploadParser, downloadParser :: Parser Command
+getParser, putParser, listParser, statParser, sha256Parser, mkdirParser, moveParser, copyParser, removeParser, uploadParser, downloadParser, uploadDirParser, downloadDirParser :: Parser Command
 getParser = CmdGet <$> remoteArg <*> localArg <*> timeoutOpt
 putParser = CmdPut <$> localArg <*> remoteArg <*> timeoutOpt
 listParser = CmdList <$> remoteArg <*> recursiveOpt <*> optional (option auto (long "max-depth" <> metavar "N" <> help "Maximum recursive depth")) <*> timeoutOpt
@@ -164,6 +193,8 @@ copyParser = CmdCopy <$> remoteArg <*> remoteArgTo <*> overwriteOpt <*> recursiv
 removeParser = CmdRemove <$> remoteArg <*> recursiveOpt <*> timeoutOpt
 uploadParser = CmdUpload <$> localArg <*> remoteArg <*> chunkSizeOpt <*> timeoutOpt
 downloadParser = CmdDownload <$> remoteArg <*> localArg <*> chunkSizeOpt <*> timeoutOpt
+uploadDirParser = CmdUploadDir <$> localArg <*> remoteArg <*> excludeHiddenOpt <*> chunkSizeOpt <*> timeoutOpt
+downloadDirParser = CmdDownloadDir <$> remoteArg <*> localArg <*> excludeHiddenOpt <*> chunkSizeOpt <*> timeoutOpt
 
 remoteArg :: Parser FilePath
 remoteArg = strArgument (metavar "REMOTE")
@@ -176,6 +207,9 @@ localArg = strArgument (metavar "LOCAL")
 
 recursiveOpt :: Parser Bool
 recursiveOpt = switch (long "recursive" <> short 'r' <> help "Enable recursive operation")
+
+excludeHiddenOpt :: Parser Bool
+excludeHiddenOpt = switch (long "exclude-hidden" <> help "Skip hidden files and directories")
 
 overwriteOpt :: Parser Bool
 overwriteOpt = switch (long "overwrite" <> help "Overwrite an existing destination")
@@ -225,18 +259,35 @@ processCommand prefix (CmdUpload local remote chunkSize timeoutSecs) =
   uploadFile prefix local remote chunkSize timeoutSecs
 processCommand prefix (CmdDownload remote local chunkSize timeoutSecs) =
   downloadFile prefix remote local chunkSize timeoutSecs
+processCommand prefix (CmdUploadDir local remote excludeHidden chunkSize timeoutSecs) =
+  uploadDirectory prefix local remote excludeHidden chunkSize timeoutSecs
+processCommand prefix (CmdDownloadDir remote local excludeHidden chunkSize timeoutSecs) =
+  downloadDirectory prefix remote local excludeHidden chunkSize timeoutSecs
 
 uploadFile :: Transport tp => String -> FilePath -> FilePath -> Int -> Int -> ClientT tp IO ()
-uploadFile prefix local remote chunkSize timeoutSecs = do
+uploadFile prefix local remote chunkSize timeoutSecs =
+  uploadOneFile True prefix local remote chunkSize timeoutSecs
+
+uploadOneFile :: Transport tp => Bool -> String -> FilePath -> FilePath -> Int -> Int -> ClientT tp IO ()
+uploadOneFile printResult prefix local remote chunkSize timeoutSecs = do
   validateChunkSize chunkSize
+  withUploadLock remote do
+    uploadOneFileLocked printResult prefix local remote chunkSize timeoutSecs
+
+uploadOneFileLocked :: Transport tp => Bool -> String -> FilePath -> FilePath -> Int -> Int -> ClientT tp IO ()
+uploadOneFileLocked printResult prefix local remote chunkSize timeoutSecs = do
   fileSize <- liftClientIO $ getFileSize local
   digest <- liftClientIO $ sha256File local
   beginBytes <- runJsonJob prefix "upload-begin" remote (jsonWorkload $ object ["size" .= fileSize, "sha256" .= digest, "chunkSize" .= chunkSize]) timeoutSecs
   beginRsp <- liftClientIO $ decodeOkResponse beginBytes
   uploadId <- liftClientIO $ requireField "uploadId" beginRsp
   startOffset <- liftClientIO $ requireField "nextOffset" beginRsp
+  liftClientIO $ logTransferFile "upload" remote local fileSize
+  liftClientIO $ logProgress "upload" remote startOffset fileSize
   loopUpload uploadId startOffset fileSize
-  runJsonJob prefix "upload-finish" uploadId emptyWorkload timeoutSecs >>= liftClientIO . printBytesLn
+  finishBytes <- runJsonJob prefix "upload-finish" uploadId emptyWorkload timeoutSecs
+  liftClientIO $ logProgress "upload" remote fileSize fileSize
+  when printResult $ liftClientIO $ printBytesLn finishBytes
   where
     loopUpload uploadId offset fileSize
       | offset >= fileSize = pure ()
@@ -249,19 +300,29 @@ uploadFile prefix local remote chunkSize timeoutSecs = do
           chunkRsp <- liftClientIO $ decodeOkResponse chunkRspBytes
           nextOffset <- liftClientIO $ requireField "nextOffset" chunkRsp
           when (nextOffset <= offset) $ liftClientIO $ die "upload did not advance"
+          when (nextOffset < fileSize) $
+            liftClientIO $ logProgress "upload" remote nextOffset fileSize
           loopUpload uploadId nextOffset fileSize
 
 downloadFile :: Transport tp => String -> FilePath -> FilePath -> Int -> Int -> ClientT tp IO ()
-downloadFile prefix remote local chunkSize timeoutSecs = do
+downloadFile prefix remote local chunkSize timeoutSecs =
+  downloadOneFile True prefix remote local chunkSize timeoutSecs
+
+downloadOneFile :: Transport tp => Bool -> String -> FilePath -> FilePath -> Int -> Int -> ClientT tp IO ()
+downloadOneFile printResult prefix remote local chunkSize timeoutSecs = do
   validateChunkSize chunkSize
-  infoBytes <- runJsonJob prefix "download-info" remote emptyWorkload timeoutSecs
-  response <- liftClientIO $ decodeOkResponse infoBytes
-  remoteSize <- liftClientIO $ requireField "size" response
-  remoteSha <- liftClientIO $ requireField "sha256" response
-  partOffset <- liftClientIO $ prepareDownloadPart local remoteSize remoteSha
-  loopDownload partOffset remoteSize remoteSha
-  liftClientIO $ finishDownload local remoteSize remoteSha
-  liftClientIO $ LBC.putStrLn $ encode $ object ["ok" .= True, "path" .= remote, "local" .= local, "size" .= remoteSize, "sha256" .= remoteSha]
+  withDownloadLock local do
+    infoBytes <- runJsonJob prefix "download-info" remote emptyWorkload timeoutSecs
+    response <- liftClientIO $ decodeOkResponse infoBytes
+    remoteSize <- liftClientIO $ requireField "size" response
+    remoteSha <- liftClientIO $ requireField "sha256" response
+    partOffset <- liftClientIO $ prepareDownloadPart local remoteSize remoteSha
+    liftClientIO $ logTransferFile "download" remote local remoteSize
+    liftClientIO $ logProgress "download" remote partOffset remoteSize
+    loopDownload partOffset remoteSize remoteSha
+    liftClientIO $ finishDownload local remoteSize remoteSha
+    liftClientIO $ logProgress "download" remote remoteSize remoteSize
+    when printResult $ liftClientIO $ LBC.putStrLn $ encode $ object ["ok" .= True, "path" .= remote, "local" .= local, "size" .= remoteSize, "sha256" .= remoteSha]
   where
     loopDownload offset remoteSize remoteSha
       | offset >= remoteSize = pure ()
@@ -273,7 +334,211 @@ downloadFile prefix remote local chunkSize timeoutSecs = do
           liftClientIO $ do
             writeDownloadChunk local offset chunk
             recordDownloadProgress local remoteSize remoteSha nextOffset
+            when (nextOffset < remoteSize) $
+              logProgress "download" remote nextOffset remoteSize
           loopDownload nextOffset remoteSize remoteSha
+
+uploadDirectory :: Transport tp => String -> FilePath -> FilePath -> Bool -> Int -> Int -> ClientT tp IO ()
+uploadDirectory prefix localRoot remoteRoot excludeHidden chunkSize timeoutSecs = do
+  validateChunkSize chunkSize
+  exists <- liftClientIO $ doesDirectoryExist localRoot
+  unless exists $ liftClientIO $ die $ "local directory does not exist: " ++ localRoot
+  (dirs, files) <- liftClientIO $ collectLocalDirectory excludeHidden localRoot
+  liftClientIO $ logTransfer $ "upload-dir start local=" ++ localRoot ++ " remote=" ++ remoteRoot ++ " directories=" ++ show (length dirs) ++ " files=" ++ show (length files) ++ " excludeHidden=" ++ show excludeHidden
+  forM_ dirs \rel -> do
+    liftClientIO $ logTransfer $ "mkdir remote=" ++ joinRemotePath remoteRoot rel
+    runJsonJob prefix "make-directory" (joinRemotePath remoteRoot rel) emptyWorkload timeoutSecs
+  results <- forM files \(local, rel) -> do
+    let remote = joinRemotePath remoteRoot rel
+    fileSize <- liftClientIO $ getFileSize local
+    if fileSize > fromIntegral defaultChunkSize
+      then do
+        uploadOneFile False prefix local remote chunkSize timeoutSecs
+        liftClientIO $ logTransfer $ "uploaded remote=" ++ remote ++ " local=" ++ local ++ " size=" ++ humanBytes fileSize ++ " mode=resumable"
+        pure True
+      else do
+        bs <- liftClientIO $ BS.readFile local
+        _ <- runJsonJob prefix "put-file" remote (Workload bs) timeoutSecs
+        liftClientIO $ logTransfer $ "uploaded remote=" ++ remote ++ " local=" ++ local ++ " size=" ++ humanBytes fileSize ++ " mode=single"
+        pure False
+  liftClientIO $ logTransfer $ "upload-dir done files=" ++ show (length files) ++ " largeFiles=" ++ show (length (filter id results))
+  liftClientIO $ LBC.putStrLn $ encode $ object
+    [ "ok" .= True
+    , "local" .= localRoot
+    , "remote" .= remoteRoot
+    , "directories" .= length dirs
+    , "files" .= length files
+    , "largeFiles" .= length (filter id results)
+    , "excludeHidden" .= excludeHidden
+    ]
+
+downloadDirectory :: Transport tp => String -> FilePath -> FilePath -> Bool -> Int -> Int -> ClientT tp IO ()
+downloadDirectory prefix remoteRoot localRoot excludeHidden chunkSize timeoutSecs = do
+  validateChunkSize chunkSize
+  rspBytes <- runJsonJob prefix "get-directory" remoteRoot (jsonWorkload $ object ["recursive" .= True, "maxDepth" .= (Nothing :: Maybe Int)]) timeoutSecs
+  rsp <- liftClientIO $ decodeOkResponse rspBytes
+  entries <- liftClientIO $ requireField "entries" rsp
+  let filteredEntries = filterRemoteEntries excludeHidden entries
+      dirs = remoteEntryDirectories filteredEntries
+      files = remoteEntryFiles filteredEntries
+  liftClientIO $ createDirectoryIfMissing True localRoot
+  liftClientIO $ logTransfer $ "download-dir start remote=" ++ remoteRoot ++ " local=" ++ localRoot ++ " directories=" ++ show (length dirs) ++ " files=" ++ show (length files) ++ " excludeHidden=" ++ show excludeHidden
+  liftClientIO $ forM_ dirs \entry -> do
+    let localDir = localRoot </> relativeRemotePath remoteRoot (remoteEntryPath entry)
+    logTransfer $ "mkdir local=" ++ localDir
+    createDirectoryIfMissing True localDir
+  results <- forM files \entry -> do
+    let remote = remoteEntryPath entry
+        local = localRoot </> relativeRemotePath remoteRoot remote
+        size = fromMaybe 0 $ remoteEntrySize entry
+    liftClientIO $ createDirectoryIfMissing True $ takeDirectory local
+    if size > fromIntegral defaultChunkSize
+      then do
+        downloadOneFile False prefix remote local chunkSize timeoutSecs
+        liftClientIO $ logTransfer $ "downloaded remote=" ++ remote ++ " local=" ++ local ++ " size=" ++ humanBytes size ++ " mode=resumable"
+        pure True
+      else do
+        bs <- runRawJob prefix "get-file" remote emptyWorkload timeoutSecs
+        liftClientIO $ BS.writeFile local bs
+        liftClientIO $ verifyDownloadedFile local entry
+        liftClientIO $ logTransfer $ "downloaded remote=" ++ remote ++ " local=" ++ local ++ " size=" ++ humanBytes size ++ " mode=single"
+        pure False
+  liftClientIO $ logTransfer $ "download-dir done files=" ++ show (length files) ++ " largeFiles=" ++ show (length (filter id results))
+  liftClientIO $ LBC.putStrLn $ encode $ object
+    [ "ok" .= True
+    , "remote" .= remoteRoot
+    , "local" .= localRoot
+    , "directories" .= length dirs
+    , "files" .= length files
+    , "largeFiles" .= length (filter id results)
+    , "excludeHidden" .= excludeHidden
+    ]
+
+collectLocalDirectory :: Bool -> FilePath -> IO ([FilePath], [(FilePath, FilePath)])
+collectLocalDirectory excludeHidden root = go ""
+  where
+    go rel = do
+      let dir = if null rel then root else root </> rel
+      names <- filter (`notElem` [".", ".."]) <$> getDirectoryContents dir
+      let visibleNames = if excludeHidden then filter (not . isHiddenName) names else names
+      children <- forM visibleNames \name -> do
+        let childRel = if null rel then name else rel </> name
+            childPath = root </> childRel
+        isFile <- doesFileExist childPath
+        isDir <- doesDirectoryExist childPath
+        if isFile then pure ([], [(childPath, childRel)])
+        else if isDir then do
+          (dirs, files) <- go childRel
+          pure (childRel : dirs, files)
+        else pure ([], [])
+      pure (concatMap fst children, concatMap snd children)
+
+filterRemoteEntries :: Bool -> [RemoteEntry] -> [RemoteEntry]
+filterRemoteEntries False = id
+filterRemoteEntries True = foldr collect []
+  where
+    collect entry acc
+      | isHiddenPath $ remoteEntryPath entry = acc
+      | otherwise = entry {remoteEntryChildren = filterRemoteEntries True <$> remoteEntryChildren entry} : acc
+
+remoteEntryDirectories :: [RemoteEntry] -> [RemoteEntry]
+remoteEntryDirectories = concatMap go
+  where
+    go entry
+      | remoteEntryType entry == "directory" =
+          entry : maybe [] remoteEntryDirectories (remoteEntryChildren entry)
+      | otherwise = []
+
+remoteEntryFiles :: [RemoteEntry] -> [RemoteEntry]
+remoteEntryFiles = concatMap go
+  where
+    go entry
+      | remoteEntryType entry == "file" = [entry]
+      | remoteEntryType entry == "directory" = maybe [] remoteEntryFiles (remoteEntryChildren entry)
+      | otherwise = []
+
+verifyDownloadedFile :: FilePath -> RemoteEntry -> IO ()
+verifyDownloadedFile local entry =
+  forM_ (remoteEntrySha256 entry) \expected -> do
+    actual <- sha256File local
+    when (actual /= expected) $
+      die $ "download checksum mismatch: " ++ remoteEntryPath entry
+
+joinRemotePath :: FilePath -> FilePath -> FilePath
+joinRemotePath root rel
+  | null root || root == "." = rel
+  | null rel = root
+  | otherwise = root </> rel
+
+relativeRemotePath :: FilePath -> FilePath -> FilePath
+relativeRemotePath root path
+  | null root || root == "." = path
+  | otherwise = makeRelative root path
+
+isHiddenPath :: FilePath -> Bool
+isHiddenPath = any isHiddenName . splitDirectories
+
+isHiddenName :: FilePath -> Bool
+isHiddenName name =
+  case takeFileName name of
+    '.' : _ -> True
+    _       -> False
+
+logTransfer :: String -> IO ()
+logTransfer message =
+  IO.hPutStrLn IO.stderr $ "[file-proxy-client] " ++ message
+
+logTransferFile :: String -> FilePath -> FilePath -> Integer -> IO ()
+logTransferFile label remote local size =
+  logTransfer $ label ++ " remote=" ++ remote ++ " local=" ++ local ++ " size=" ++ humanBytes size
+
+logProgress :: String -> FilePath -> Integer -> Integer -> IO ()
+logProgress label remote done total = do
+  let line =
+        "\ESC[2K\r[file-proxy-client] "
+          ++ label ++ " "
+          ++ progressBar done total ++ " "
+          ++ padLeft 3 (show $ progressPercent done total) ++ "% "
+          ++ humanBytes done ++ "/" ++ humanBytes total
+          ++ " file=" ++ takeFileName remote
+  IO.hPutStr IO.stderr line
+  when (done >= total) $ IO.hPutChar IO.stderr '\n'
+  IO.hFlush IO.stderr
+
+progressBar :: Integer -> Integer -> String
+progressBar done total =
+  "[" ++ body ++ "]"
+  where
+    width = 30
+    filled
+      | total <= 0 = width
+      | otherwise = fromIntegral $ min (fromIntegral width) $ max 0 $ done * fromIntegral width `div` total
+    body
+      | done >= total = replicate width '='
+      | filled <= 0 = ">" ++ replicate (width - 1) '.'
+      | otherwise = replicate filled '=' ++ ">" ++ replicate (width - filled - 1) '.'
+
+padLeft :: Int -> String -> String
+padLeft width raw =
+  replicate (max 0 $ width - length raw) ' ' ++ raw
+
+progressPercent :: Integer -> Integer -> Integer
+progressPercent _ total | total <= 0 = 100
+progressPercent done total = min 100 $ max 0 $ done * 100 `div` total
+
+humanBytes :: Integer -> String
+humanBytes bytes
+  | bytes < 1024 = show bytes ++ " B"
+  | bytes < 1024 * 1024 = humanUnit bytes 1024 "KiB"
+  | bytes < 1024 * 1024 * 1024 = humanUnit bytes (1024 * 1024) "MiB"
+  | otherwise = humanUnit bytes (1024 * 1024 * 1024) "GiB"
+
+humanUnit :: Integer -> Integer -> String -> String
+humanUnit bytes unit suffix =
+  let tenths = bytes * 10 `div` unit
+      whole = tenths `div` 10
+      frac = tenths `mod` 10
+  in show whole ++ "." ++ show frac ++ " " ++ suffix
 
 runJsonJob :: Transport tp => String -> String -> FilePath -> Workload -> Int -> ClientT tp IO BS.ByteString
 runJsonJob prefix func job wl timeoutSecs = do
@@ -336,6 +601,60 @@ readFileChunk path offset size =
   IO.withBinaryFile path IO.ReadMode \h -> do
     IO.hSeek h IO.AbsoluteSeek offset
     BS.hGet h $ fromIntegral size
+
+uploadLockKey :: FilePath -> String
+uploadLockKey remote = "upload-" ++ sha256Bytes (B.pack remote)
+
+acquireNamedLock :: String -> String -> IO ()
+acquireNamedLock label lockPath = do
+  createDirectoryIfMissing True $ takeDirectory lockPath
+  exists <- doesPathExist lockPath
+  if exists
+    then
+      die $ label ++ " is already in progress (lock: " ++ lockPath ++ ")"
+    else do
+      acquired <- E.try (createNamedPipe lockPath 0o600) :: IO (Either E.IOException ())
+      case acquired of
+        Right () -> pure ()
+        Left _ ->
+          die $ label ++ " is already in progress (lock: " ++ lockPath ++ ")"
+
+releaseNamedLock :: String -> IO ()
+releaseNamedLock lockPath = do
+  removed <- E.try (removeFile lockPath) :: IO (Either E.IOException ())
+  case removed of
+    Right () -> pure ()
+    Left _ -> pure ()
+
+withUploadLock :: Transport tp => FilePath -> ClientT tp IO a -> ClientT tp IO a
+withUploadLock remote clientAction = do
+  liftClientIO $ acquireUploadLock remote
+  clientAction `finally` liftClientIO (releaseUploadLock remote)
+
+withDownloadLock :: Transport tp => FilePath -> ClientT tp IO a -> ClientT tp IO a
+withDownloadLock local clientAction = do
+  liftClientIO $ acquireDownloadLock local
+  clientAction `finally` liftClientIO (releaseDownloadLock local)
+
+acquireUploadLock :: FilePath -> IO ()
+acquireUploadLock remote = do
+  acquireNamedLock ("upload for remote path " ++ remote) ("/tmp" </> "file-proxy-client-locks" </> uploadLockKey remote)
+
+releaseUploadLock :: FilePath -> IO ()
+releaseUploadLock remote = do
+  releaseNamedLock $ "/tmp" </> "file-proxy-client-locks" </> uploadLockKey remote
+
+downloadLockPath :: FilePath -> FilePath
+downloadLockPath local = downloadPartPath local ++ ".lock"
+
+acquireDownloadLock :: FilePath -> IO ()
+acquireDownloadLock local = do
+  createDirectoryIfMissing True $ takeDirectory local
+  acquireNamedLock ("download for local path " ++ local) (downloadLockPath local)
+
+releaseDownloadLock :: FilePath -> IO ()
+releaseDownloadLock local =
+  releaseNamedLock $ downloadLockPath local
 
 downloadPartPath :: FilePath -> FilePath
 downloadPartPath path = path ++ ".part"

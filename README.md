@@ -38,13 +38,13 @@ PERIODIC_PORT=unix:///tmp/periodic.sock stack exec file-proxy -- --root /path/to
 - `--client-name NAME`: auth client name. Env: `PERIODIC_CLIENT_NAME`.
 - `--client-token TOKEN`: auth client token. Env: `PERIODIC_CLIENT_TOKEN`.
 - `--allow-delete`: allow `delete-path`. Env: `FILE_PROXY_ALLOW_DELETE=true`. Default: disabled.
-- `--prefix PREFIX`: prefix for worker function names. Env: `FILE_PROXY_FUNC_PREFIX`. Default: empty.
+- `--prefix PREFIX`: prefix for worker function names. Env: `PERIODIC_FUNC_PREFIX`. Default: empty.
 
 If `--rsa-private-path` is empty, the worker uses a plain socket transport. If it is non-empty, the worker wraps the socket with RSA using `--rsa-mode`, `--rsa-private-path`, and `--rsa-public-path`.
 
 `--client-name` and `--client-token` must be provided together.
 
-When `--prefix` or `FILE_PROXY_FUNC_PREFIX` is set, start the worker and call the client with the same value. The prefix is concatenated exactly as provided, so `--prefix files-` registers and calls functions such as `files-get-file`.
+When `--prefix` or `PERIODIC_FUNC_PREFIX` is set, start the worker and call the client with the same value. The prefix is concatenated exactly as provided, so `--prefix files-` registers and calls functions such as `files-get-file`.
 
 ## Response Format
 
@@ -73,6 +73,8 @@ file-proxy-client stat path/to/file.txt
 file-proxy-client sha256 path/to/file.txt
 file-proxy-client sha256 path/to/dir --recursive
 file-proxy-client download path/to/file.txt ./local-file
+file-proxy-client upload-dir ./local-dir remote/dir --exclude-hidden
+file-proxy-client download-dir remote/dir ./local-dir --exclude-hidden
 file-proxy-client mkdir path/to/dir
 file-proxy-client mv old/name.txt new/name.txt --overwrite
 file-proxy-client cp src/name.txt dst/name.txt --overwrite
@@ -84,6 +86,8 @@ Paths are relative to the worker root. Absolute paths, `..` traversal, and `.fil
 
 `delete-path` is disabled unless the worker is started with `--allow-delete` or `FILE_PROXY_ALLOW_DELETE=true`.
 
+Use `upload-dir` and `download-dir` for recursive directory transfers. They preserve relative paths under the directory argument, use single-shot transfer for files up to 1 MiB, and switch to resumable transfer for larger files. Add `--exclude-hidden` to skip path components whose names start with `.`. Directory transfer logs and large-file progress bars are written to stderr; the final stdout line remains JSON.
+
 ## Resumable Upload
 
 Use `upload` for large files. It stores temporary state under the worker root in `.file-proxy/uploads/` and publishes the target file only after the final SHA-256 matches.
@@ -94,7 +98,7 @@ file-proxy-client upload ./big.bin remote/big.bin --chunk-size 1048576 --timeout
 
 The client calls `upload-begin`, `upload-chunk`, and `upload-finish` internally. Chunk uploads remain idempotent when the same offset, size, and chunk SHA-256 are sent again. Conflicting overlapping chunks return `chunk_conflict`.
 
-Use `--timeout` when sending large payloads.
+Upload progress is rendered to stderr as a single-line progress bar. The client prevents concurrent uploads to the same remote path on the same host with a lock under `/tmp/file-proxy-client-locks/`. Use `--timeout` when sending large payloads.
 
 ## Resumable Download
 
@@ -105,3 +109,5 @@ file-proxy-client download remote/big.bin ./big.bin --chunk-size 1048576 --timeo
 ```
 
 The worker still serves `download-info` and `download-chunk` internally. `download-chunk` returns raw file bytes on success. If a requested range extends past EOF, it returns the remaining bytes. Offsets past EOF are rejected with `range_out_of_bounds`.
+
+Download progress is rendered to stderr as a single-line progress bar. The client prevents concurrent downloads to the same local path with a `<local>.part.lock` lock file.

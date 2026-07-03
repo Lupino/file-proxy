@@ -251,6 +251,11 @@ main = hspec do
       nextChunkSize 4 8 10 `shouldBe` 2
       nextChunkSize 4 10 10 `shouldBe` 0
 
+    it "detects hidden path components" do
+      isHiddenPath ".env" `shouldBe` True
+      isHiddenPath "src/.cache/file" `shouldBe` True
+      isHiddenPath "src/FileProxy/Client.hs" `shouldBe` False
+
     it "uses a stable partial download path" do
       downloadPartPath "remote.bin" `shouldBe` "remote.bin.part"
 

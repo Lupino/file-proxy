@@ -42,6 +42,7 @@ library:
   - metro
   - metro-socket
   - metro-transport-crypto
+  - unix
 
 executables:
   file-proxy:
