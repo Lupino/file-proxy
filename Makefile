@@ -23,7 +23,7 @@ endif
 endif
 endif
 
-OUT = file-proxy
+OUT = file-proxy file-proxy-client
 
 BUNDLE_BIN = dist/bundle/bin
 BUNDLE_LIB = dist/bundle/lib/file-proxy
@@ -43,7 +43,7 @@ dist/$(PLATFORM)/%: dist/$(PLATFORM)
 	nix-shell --run "$(STRIP) -s $@" --argstr compiler-nix-name $(COMPILER) --arg crossPlatforms "ps: with ps; [$(PLATFORM)]"
 	chmod -w $@
 
-file-proxy:
+$(OUT):
 	PKG=file-proxy make dist/$(PLATFORM)/$@$(EXT)
 
 package: $(OUT)
@@ -60,13 +60,31 @@ macos-build:
 	stack install --local-bin-path bin
 
 macos-install:
+	rm -rf dist/bundle
 	@mkdir -p dist/bundle
 	echo '#!/usr/bin/env bash' > dist/bundle/install.sh
 
-macos-bundle: macos-install macos-build $(BUNDLE_BINS)
+macos-bundle: macos-install
+	$(MAKE) $(BUNDLE_BINS)
+	$(MAKE) macos-verify
 	cd dist/bundle && find lib -type f | while read F; do echo sudo xattr -d com.apple.quarantine $$F >> install.sh; done
 	chmod +x dist/bundle/install.sh
 	cd dist/bundle && tar cjvf ../file-proxy-macos-aarch64-bundle.tar.bz2 .
+
+macos-build-bundle: macos-build macos-bundle
+
+macos-static: macos-bundle
+
+macos-verify:
+	@set -e; \
+	for F in $(BUNDLE_BINS); do \
+		echo "Checking $$F"; \
+		otool -L "$$F"; \
+		if otool -L "$$F" | grep -q '/nix/store'; then \
+			echo "error: $$F still links against /nix/store" >&2; \
+			exit 1; \
+		fi; \
+	done
 
 update-sha256:
 	gawk -f nix/update-sha256.awk cabal.project > nix/sha256map.nix
@@ -80,5 +98,7 @@ help:
 	@echo make PLATFORM=aarch64-multiplatform-musl
 	@echo make PLATFORM=mingwW64
 	@echo make macos-bundle
+	@echo make macos-build-bundle
+	@echo make macos-static
 	@echo make clean
 	@echo make update-sha256
