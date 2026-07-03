@@ -254,6 +254,10 @@ main = hspec do
     it "uses a stable partial download path" do
       downloadPartPath "remote.bin" `shouldBe` "remote.bin.part"
 
+    it "prefixes worker function names with raw concatenation" do
+      prefixFunctionName "" "get-file" `shouldBe` "get-file"
+      prefixFunctionName "files-" "get-file" `shouldBe` "files-get-file"
+
 isLeft :: Either a b -> Bool
 isLeft (Left _) = True
 isLeft _        = False

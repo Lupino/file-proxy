@@ -26,6 +26,7 @@ module FileProxy.Worker
   , apiUploadFinish
   , apiUploadStatus
   , parseUploadChunkName
+  , prefixFunctionName
   , resolveUserPath
   , sha256Bytes
   , sha256File
@@ -80,6 +81,7 @@ data Flags = Flags
   , clientName     :: Maybe String
   , clientToken    :: Maybe String
   , allowDelete    :: Bool
+  , funcPrefix     :: String
   }
 
 data ApiConfig = ApiConfig
@@ -109,8 +111,8 @@ jsonBytes = LB.toStrict . encode
 jsonValue :: Value -> B.ByteString
 jsonValue = jsonBytes
 
-flags :: Maybe String -> Maybe String -> Maybe String -> Maybe String -> Maybe String -> Maybe RSA.RSAMode -> Maybe Bool -> Parser Flags
-flags mHost mClientName mClientToken mRsaPrivate mRsaPublic mRsaMode mAllowDelete =
+flags :: Maybe String -> Maybe String -> Maybe String -> Maybe String -> Maybe String -> Maybe RSA.RSAMode -> Maybe Bool -> Maybe String -> Parser Flags
+flags mHost mClientName mClientToken mRsaPrivate mRsaPublic mRsaMode mAllowDelete mFuncPrefix =
   mkFlags
     <$> strOption (long "host" <> short 'H' <> metavar "HOST" <> showDefault <> value (fromMaybe "unix:///tmp/periodic.sock" mHost) <> help "Periodic server address [$PERIODIC_PORT].")
     <*> strOption (long "root" <> short 'r' <> metavar "ROOT" <> showDefault <> value "." <> help "FileSystem root path.")
@@ -121,8 +123,9 @@ flags mHost mClientName mClientToken mRsaPrivate mRsaPublic mRsaMode mAllowDelet
     <*> optional (strOption (long "client-name" <> metavar "NAME" <> value (fromMaybe "" mClientName) <> help "Auth client name [$PERIODIC_CLIENT_NAME]."))
     <*> optional (strOption (long "client-token" <> metavar "TOKEN" <> value (fromMaybe "" mClientToken) <> help "Auth client token [$PERIODIC_CLIENT_TOKEN]."))
     <*> switch (long "allow-delete" <> help "Allow delete-path to remove files and directories [$FILE_PROXY_ALLOW_DELETE].")
+    <*> strOption (long "prefix" <> metavar "PREFIX" <> showDefault <> value (fromMaybe "" mFuncPrefix) <> help "Prefix for registered worker function names [$FILE_PROXY_FUNC_PREFIX].")
   where
-    mkFlags hostPort rootPath workThread rsaPrivatePath rsaPublicPath rsaMode clientName clientToken cliAllowDelete =
+    mkFlags hostPort rootPath workThread rsaPrivatePath rsaPublicPath rsaMode clientName clientToken cliAllowDelete funcPrefix =
       Flags
         { hostPort = hostPort
         , rootPath = rootPath
@@ -133,6 +136,7 @@ flags mHost mClientName mClientToken mRsaPrivate mRsaPublic mRsaMode mAllowDelet
         , clientName = clientName
         , clientToken = clientToken
         , allowDelete = cliAllowDelete || fromMaybe False mAllowDelete
+        , funcPrefix = funcPrefix
         }
 
 someFunc :: IO ()
@@ -144,39 +148,45 @@ someFunc = do
   envRsaPublic <- lookupEnv "PERIODIC_RSA_PUBLIC_PATH"
   envRsaMode <- traverse readRsaMode =<< lookupEnv "PERIODIC_RSA_MODE"
   envAllowDelete <- fmap parseBool <$> lookupEnv "FILE_PROXY_ALLOW_DELETE"
+  envFuncPrefix <- lookupEnv "FILE_PROXY_FUNC_PREFIX"
 
-  parsedFlags@Flags {..} <- execParser $ opts envHost envClientName envClientToken envRsaPrivate envRsaPublic envRsaMode envAllowDelete
+  parsedFlags@Flags {..} <- execParser $ opts envHost envClientName envClientToken envRsaPrivate envRsaPublic envRsaMode envAllowDelete envFuncPrefix
   auth <- requireAuthPair parsedFlags
   let cfg = ApiConfig rootPath allowDelete
 
   case rsaPrivatePath of
-    "" -> startWorkerTWithSignalWithAuth auth Nothing (pure ()) (socket hostPort) $ registerWorkers cfg workThread
+    "" -> startWorkerTWithSignalWithAuth auth Nothing (pure ()) (socket hostPort) $ registerWorkers cfg funcPrefix workThread
     _ -> do
       genTP <- RSA.configClient rsaMode rsaPrivatePath rsaPublicPath
-      startWorkerTWithSignalWithAuth auth Nothing (pure ()) (genTP $ socket hostPort) $ registerWorkers cfg workThread
+      startWorkerTWithSignalWithAuth auth Nothing (pure ()) (genTP $ socket hostPort) $ registerWorkers cfg funcPrefix workThread
   where
-    opts h n t priv pub mode del =
-      info (flags h n t priv pub mode del <**> helper) (fullDesc <> header "file-proxy - a file proxy worker" )
+    opts h n t priv pub mode del prefix =
+      info (flags h n t priv pub mode del prefix <**> helper) (fullDesc <> header "file-proxy - a file proxy worker" )
 
-registerWorkers :: (Transport tp, MonadUnliftIO m) => ApiConfig -> Int -> WorkerT tp m ()
-registerWorkers cfg thread = do
-  void $ addFunc (fromString "get-file") $ getFile cfg
-  void $ addFunc (fromString "put-file") $ putFile cfg
-  void $ addFunc (fromString "get-directory") $ getDirectory cfg
-  void $ addFunc (fromString "stat-path") $ statPath cfg
-  void $ addFunc (fromString "sha256sum") $ sha256Sum cfg
-  void $ addFunc (fromString "make-directory") $ makeDirectory cfg
-  void $ addFunc (fromString "delete-path") $ deletePath cfg
-  void $ addFunc (fromString "move-path") $ movePath cfg
-  void $ addFunc (fromString "copy-path") $ copyPath cfg
-  void $ addFunc (fromString "download-info") $ downloadInfo cfg
-  void $ addFunc (fromString "download-chunk") $ downloadChunk cfg
-  void $ addFunc (fromString "upload-begin") $ uploadBegin cfg
-  void $ addFunc (fromString "upload-chunk") $ uploadChunk cfg
-  void $ addFunc (fromString "upload-status") $ uploadStatus cfg
-  void $ addFunc (fromString "upload-finish") $ uploadFinish cfg
-  void $ addFunc (fromString "upload-abort") $ uploadAbort cfg
+registerWorkers :: (Transport tp, MonadUnliftIO m) => ApiConfig -> String -> Int -> WorkerT tp m ()
+registerWorkers cfg prefix thread = do
+  void $ addFunc (func "get-file") $ getFile cfg
+  void $ addFunc (func "put-file") $ putFile cfg
+  void $ addFunc (func "get-directory") $ getDirectory cfg
+  void $ addFunc (func "stat-path") $ statPath cfg
+  void $ addFunc (func "sha256sum") $ sha256Sum cfg
+  void $ addFunc (func "make-directory") $ makeDirectory cfg
+  void $ addFunc (func "delete-path") $ deletePath cfg
+  void $ addFunc (func "move-path") $ movePath cfg
+  void $ addFunc (func "copy-path") $ copyPath cfg
+  void $ addFunc (func "download-info") $ downloadInfo cfg
+  void $ addFunc (func "download-chunk") $ downloadChunk cfg
+  void $ addFunc (func "upload-begin") $ uploadBegin cfg
+  void $ addFunc (func "upload-chunk") $ uploadChunk cfg
+  void $ addFunc (func "upload-status") $ uploadStatus cfg
+  void $ addFunc (func "upload-finish") $ uploadFinish cfg
+  void $ addFunc (func "upload-abort") $ uploadAbort cfg
   work thread
+  where
+    func = fromString . prefixFunctionName prefix
+
+prefixFunctionName :: String -> String -> String
+prefixFunctionName prefix func = prefix ++ func
 
 requireAuthPair :: Flags -> IO (Maybe ClientIdentity)
 requireAuthPair Flags {clientName = Nothing, clientToken = Nothing} = pure Nothing

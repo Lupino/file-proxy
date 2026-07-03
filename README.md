@@ -38,10 +38,13 @@ PERIODIC_PORT=unix:///tmp/periodic.sock stack exec file-proxy -- --root /path/to
 - `--client-name NAME`: auth client name. Env: `PERIODIC_CLIENT_NAME`.
 - `--client-token TOKEN`: auth client token. Env: `PERIODIC_CLIENT_TOKEN`.
 - `--allow-delete`: allow `delete-path`. Env: `FILE_PROXY_ALLOW_DELETE=true`. Default: disabled.
+- `--prefix PREFIX`: prefix for worker function names. Env: `FILE_PROXY_FUNC_PREFIX`. Default: empty.
 
 If `--rsa-private-path` is empty, the worker uses a plain socket transport. If it is non-empty, the worker wraps the socket with RSA using `--rsa-mode`, `--rsa-private-path`, and `--rsa-public-path`.
 
 `--client-name` and `--client-token` must be provided together.
+
+When `--prefix` or `FILE_PROXY_FUNC_PREFIX` is set, start the worker and call the client with the same value. The prefix is concatenated exactly as provided, so `--prefix files-` registers and calls functions such as `files-get-file`.
 
 ## Response Format
 

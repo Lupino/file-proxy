@@ -7,6 +7,8 @@ description: Use file-proxy through file-proxy-client. Trigger when Codex needs 
 
 Use this skill only for calling an already running `file-proxy` worker through `file-proxy-client`.
 
+If the worker was started with `--prefix PREFIX` or `FILE_PROXY_FUNC_PREFIX`, pass the same prefix to `file-proxy-client` with `--prefix PREFIX` or the same environment variable. The prefix is concatenated exactly as provided, for example `--prefix files-` calls `files-get-file`.
+
 ## Response Format
 
 Most functions return JSON:

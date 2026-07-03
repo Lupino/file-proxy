@@ -27,7 +27,8 @@ import qualified Data.ByteString.Lazy   as LB
 import qualified Data.ByteString.Lazy.Char8 as LBC
 import           Data.Maybe             (fromMaybe)
 import           Data.String            (fromString)
-import           FileProxy.Worker       (sha256Bytes, sha256File)
+import           FileProxy.Worker       (prefixFunctionName, sha256Bytes,
+                                         sha256File)
 import           Metro.Class            (Transport)
 import qualified Metro.TP.RSA           as RSA (RSAMode (AES), configClient)
 import           Metro.TP.Socket        (socket)
@@ -70,6 +71,7 @@ data GlobalOptions = GlobalOptions
   , optRsaMode        :: RSA.RSAMode
   , optClientName     :: Maybe String
   , optClientToken    :: Maybe String
+  , optFuncPrefix     :: String
   , optCommand        :: Command
   }
 
@@ -97,9 +99,10 @@ clientMain = do
   envRsaMode <- lookupReadEnv "PERIODIC_RSA_MODE" >>= either die (pure . fromMaybe RSA.AES)
   envClientName <- lookupNonEmptyEnv "PERIODIC_CLIENT_NAME"
   envClientToken <- lookupNonEmptyEnv "PERIODIC_CLIENT_TOKEN"
-  opts <- execParser $ parserInfo envHost envRsaPrivate envRsaPublic envRsaMode envClientName envClientToken
+  envFuncPrefix <- lookupNonEmptyEnv "FILE_PROXY_FUNC_PREFIX"
+  opts <- execParser $ parserInfo envHost envRsaPrivate envRsaPublic envRsaMode envClientName envClientToken envFuncPrefix
   validateHost $ optHost opts
-  runWithConnection opts $ processCommand $ optCommand opts
+  runWithConnection opts $ processCommand (optFuncPrefix opts) $ optCommand opts
 
 parserInfo
   :: Maybe String
@@ -108,9 +111,10 @@ parserInfo
   -> RSA.RSAMode
   -> Maybe String
   -> Maybe String
+  -> Maybe String
   -> ParserInfo GlobalOptions
-parserInfo envHost envRsaPrivate envRsaPublic envRsaMode envClientName envClientToken =
-  info (globalParser envHost envRsaPrivate envRsaPublic envRsaMode envClientName envClientToken <**> helper)
+parserInfo envHost envRsaPrivate envRsaPublic envRsaMode envClientName envClientToken envFuncPrefix =
+  info (globalParser envHost envRsaPrivate envRsaPublic envRsaMode envClientName envClientToken envFuncPrefix <**> helper)
     (fullDesc <> header "file-proxy-client - file-oriented client for a file-proxy worker")
 
 globalParser
@@ -120,8 +124,9 @@ globalParser
   -> RSA.RSAMode
   -> Maybe String
   -> Maybe String
+  -> Maybe String
   -> Parser GlobalOptions
-globalParser envHost envRsaPrivate envRsaPublic envRsaMode envClientName envClientToken =
+globalParser envHost envRsaPrivate envRsaPublic envRsaMode envClientName envClientToken envFuncPrefix =
   GlobalOptions
     <$> strOption (long "host" <> short 'H' <> metavar "HOST" <> showDefault <> value (fromMaybe "unix:///tmp/periodic.sock" envHost) <> help "Periodic server address [$PERIODIC_PORT].")
     <*> strOption (long "rsa-private-path" <> metavar "PATH" <> showDefault <> value (fromMaybe "" envRsaPrivate) <> help "RSA private key file path [$PERIODIC_RSA_PRIVATE_PATH].")
@@ -129,6 +134,7 @@ globalParser envHost envRsaPrivate envRsaPublic envRsaMode envClientName envClie
     <*> option auto (long "rsa-mode" <> metavar "MODE" <> showDefault <> value envRsaMode <> help "RSA mode: Plain, RSA, or AES [$PERIODIC_RSA_MODE].")
     <*> optional (strOption (long "client-name" <> metavar "NAME" <> value (fromMaybe "" envClientName) <> help "Auth client name [$PERIODIC_CLIENT_NAME]."))
     <*> optional (strOption (long "client-token" <> metavar "TOKEN" <> value (fromMaybe "" envClientToken) <> help "Auth client token [$PERIODIC_CLIENT_TOKEN]."))
+    <*> strOption (long "prefix" <> metavar "PREFIX" <> showDefault <> value (fromMaybe "" envFuncPrefix) <> help "Prefix for worker function names [$FILE_PROXY_FUNC_PREFIX].")
     <*> commandParser
 
 commandParser :: Parser Command
@@ -192,45 +198,45 @@ runWithConnection GlobalOptions {..} clientAction = do
       clientEnv <- maybe (open (genTP $ socket optHost)) (openWithAuth (genTP $ socket optHost)) auth
       runClientT clientEnv clientAction
 
-processCommand :: Transport tp => Command -> ClientT tp IO ()
-processCommand (CmdGet remote local timeoutSecs) = do
-  bs <- runRawJob "get-file" remote emptyWorkload timeoutSecs
+processCommand :: Transport tp => String -> Command -> ClientT tp IO ()
+processCommand prefix (CmdGet remote local timeoutSecs) = do
+  bs <- runRawJob prefix "get-file" remote emptyWorkload timeoutSecs
   liftClientIO $ do
     createDirectoryIfMissing True $ takeDirectory local
     BS.writeFile local bs
-processCommand (CmdPut local remote timeoutSecs) = do
+processCommand prefix (CmdPut local remote timeoutSecs) = do
   bs <- liftClientIO $ BS.readFile local
-  runJsonJob "put-file" remote (Workload bs) timeoutSecs >>= liftClientIO . printBytesLn
-processCommand (CmdList remote recursive maxDepth timeoutSecs) =
-  runJsonJob "get-directory" remote (jsonWorkload $ object ["recursive" .= recursive, "maxDepth" .= maxDepth]) timeoutSecs >>= liftClientIO . printBytesLn
-processCommand (CmdStat remote timeoutSecs) =
-  runJsonJob "stat-path" remote emptyWorkload timeoutSecs >>= liftClientIO . printBytesLn
-processCommand (CmdSha256 remote recursive timeoutSecs) =
-  runJsonJob "sha256sum" remote (jsonWorkload $ object ["recursive" .= recursive]) timeoutSecs >>= liftClientIO . printBytesLn
-processCommand (CmdMkdir remote timeoutSecs) =
-  runJsonJob "make-directory" remote emptyWorkload timeoutSecs >>= liftClientIO . printBytesLn
-processCommand (CmdMove from to overwrite timeoutSecs) =
-  runJsonJob "move-path" from (jsonWorkload $ object ["to" .= to, "overwrite" .= overwrite]) timeoutSecs >>= liftClientIO . printBytesLn
-processCommand (CmdCopy from to overwrite recursive timeoutSecs) =
-  runJsonJob "copy-path" from (jsonWorkload $ object ["to" .= to, "overwrite" .= overwrite, "recursive" .= recursive]) timeoutSecs >>= liftClientIO . printBytesLn
-processCommand (CmdRemove remote recursive timeoutSecs) =
-  runJsonJob "delete-path" remote (jsonWorkload $ object ["recursive" .= recursive]) timeoutSecs >>= liftClientIO . printBytesLn
-processCommand (CmdUpload local remote chunkSize timeoutSecs) =
-  uploadFile local remote chunkSize timeoutSecs
-processCommand (CmdDownload remote local chunkSize timeoutSecs) =
-  downloadFile remote local chunkSize timeoutSecs
+  runJsonJob prefix "put-file" remote (Workload bs) timeoutSecs >>= liftClientIO . printBytesLn
+processCommand prefix (CmdList remote recursive maxDepth timeoutSecs) =
+  runJsonJob prefix "get-directory" remote (jsonWorkload $ object ["recursive" .= recursive, "maxDepth" .= maxDepth]) timeoutSecs >>= liftClientIO . printBytesLn
+processCommand prefix (CmdStat remote timeoutSecs) =
+  runJsonJob prefix "stat-path" remote emptyWorkload timeoutSecs >>= liftClientIO . printBytesLn
+processCommand prefix (CmdSha256 remote recursive timeoutSecs) =
+  runJsonJob prefix "sha256sum" remote (jsonWorkload $ object ["recursive" .= recursive]) timeoutSecs >>= liftClientIO . printBytesLn
+processCommand prefix (CmdMkdir remote timeoutSecs) =
+  runJsonJob prefix "make-directory" remote emptyWorkload timeoutSecs >>= liftClientIO . printBytesLn
+processCommand prefix (CmdMove from to overwrite timeoutSecs) =
+  runJsonJob prefix "move-path" from (jsonWorkload $ object ["to" .= to, "overwrite" .= overwrite]) timeoutSecs >>= liftClientIO . printBytesLn
+processCommand prefix (CmdCopy from to overwrite recursive timeoutSecs) =
+  runJsonJob prefix "copy-path" from (jsonWorkload $ object ["to" .= to, "overwrite" .= overwrite, "recursive" .= recursive]) timeoutSecs >>= liftClientIO . printBytesLn
+processCommand prefix (CmdRemove remote recursive timeoutSecs) =
+  runJsonJob prefix "delete-path" remote (jsonWorkload $ object ["recursive" .= recursive]) timeoutSecs >>= liftClientIO . printBytesLn
+processCommand prefix (CmdUpload local remote chunkSize timeoutSecs) =
+  uploadFile prefix local remote chunkSize timeoutSecs
+processCommand prefix (CmdDownload remote local chunkSize timeoutSecs) =
+  downloadFile prefix remote local chunkSize timeoutSecs
 
-uploadFile :: Transport tp => FilePath -> FilePath -> Int -> Int -> ClientT tp IO ()
-uploadFile local remote chunkSize timeoutSecs = do
+uploadFile :: Transport tp => String -> FilePath -> FilePath -> Int -> Int -> ClientT tp IO ()
+uploadFile prefix local remote chunkSize timeoutSecs = do
   validateChunkSize chunkSize
   fileSize <- liftClientIO $ getFileSize local
   digest <- liftClientIO $ sha256File local
-  beginBytes <- runJsonJob "upload-begin" remote (jsonWorkload $ object ["size" .= fileSize, "sha256" .= digest, "chunkSize" .= chunkSize]) timeoutSecs
+  beginBytes <- runJsonJob prefix "upload-begin" remote (jsonWorkload $ object ["size" .= fileSize, "sha256" .= digest, "chunkSize" .= chunkSize]) timeoutSecs
   beginRsp <- liftClientIO $ decodeOkResponse beginBytes
   uploadId <- liftClientIO $ requireField "uploadId" beginRsp
   startOffset <- liftClientIO $ requireField "nextOffset" beginRsp
   loopUpload uploadId startOffset fileSize
-  runJsonJob "upload-finish" uploadId emptyWorkload timeoutSecs >>= liftClientIO . printBytesLn
+  runJsonJob prefix "upload-finish" uploadId emptyWorkload timeoutSecs >>= liftClientIO . printBytesLn
   where
     loopUpload uploadId offset fileSize
       | offset >= fileSize = pure ()
@@ -239,16 +245,16 @@ uploadFile local remote chunkSize timeoutSecs = do
           chunk <- liftClientIO $ readFileChunk local offset size
           let chunkDigest = sha256Bytes chunk
               chunkName = uploadId <> "/" <> show offset <> "/" <> chunkDigest
-          chunkRspBytes <- runJsonJob "upload-chunk" chunkName (Workload chunk) timeoutSecs
+          chunkRspBytes <- runJsonJob prefix "upload-chunk" chunkName (Workload chunk) timeoutSecs
           chunkRsp <- liftClientIO $ decodeOkResponse chunkRspBytes
           nextOffset <- liftClientIO $ requireField "nextOffset" chunkRsp
           when (nextOffset <= offset) $ liftClientIO $ die "upload did not advance"
           loopUpload uploadId nextOffset fileSize
 
-downloadFile :: Transport tp => FilePath -> FilePath -> Int -> Int -> ClientT tp IO ()
-downloadFile remote local chunkSize timeoutSecs = do
+downloadFile :: Transport tp => String -> FilePath -> FilePath -> Int -> Int -> ClientT tp IO ()
+downloadFile prefix remote local chunkSize timeoutSecs = do
   validateChunkSize chunkSize
-  infoBytes <- runJsonJob "download-info" remote emptyWorkload timeoutSecs
+  infoBytes <- runJsonJob prefix "download-info" remote emptyWorkload timeoutSecs
   response <- liftClientIO $ decodeOkResponse infoBytes
   remoteSize <- liftClientIO $ requireField "size" response
   remoteSha <- liftClientIO $ requireField "sha256" response
@@ -261,7 +267,7 @@ downloadFile remote local chunkSize timeoutSecs = do
       | offset >= remoteSize = pure ()
       | otherwise = do
           let size = nextChunkSize chunkSize offset remoteSize
-          chunk <- runRawJob "download-chunk" remote (jsonWorkload $ object ["offset" .= offset, "size" .= size]) timeoutSecs
+          chunk <- runRawJob prefix "download-chunk" remote (jsonWorkload $ object ["offset" .= offset, "size" .= size]) timeoutSecs
           when (BS.null chunk) $ liftClientIO $ die "download returned an empty chunk before EOF"
           let nextOffset = offset + fromIntegral (BS.length chunk)
           liftClientIO $ do
@@ -269,18 +275,19 @@ downloadFile remote local chunkSize timeoutSecs = do
             recordDownloadProgress local remoteSize remoteSha nextOffset
           loopDownload nextOffset remoteSize remoteSha
 
-runJsonJob :: Transport tp => String -> FilePath -> Workload -> Int -> ClientT tp IO BS.ByteString
-runJsonJob func job wl timeoutSecs = do
-  bs <- runRawJob func job wl timeoutSecs
+runJsonJob :: Transport tp => String -> String -> FilePath -> Workload -> Int -> ClientT tp IO BS.ByteString
+runJsonJob prefix func job wl timeoutSecs = do
+  bs <- runRawJob prefix func job wl timeoutSecs
   _ <- liftClientIO $ decodeOkResponse bs
   pure bs
 
-runRawJob :: Transport tp => String -> FilePath -> Workload -> Int -> ClientT tp IO BS.ByteString
-runRawJob func job wl timeoutSecs = do
-  result <- runJob (fromString func) (fromString job) wl timeoutSecs
+runRawJob :: Transport tp => String -> String -> FilePath -> Workload -> Int -> ClientT tp IO BS.ByteString
+runRawJob prefix func job wl timeoutSecs = do
+  let fullFunc = prefixFunctionName prefix func
+  result <- runJob (fromString fullFunc) (fromString job) wl timeoutSecs
   case result of
     Just bs -> pure bs
-    Nothing -> liftClientIO $ die $ "file-proxy worker function failed: " ++ func
+    Nothing -> liftClientIO $ die $ "file-proxy worker function failed: " ++ fullFunc
 
 emptyWorkload :: Workload
 emptyWorkload = Workload BS.empty
