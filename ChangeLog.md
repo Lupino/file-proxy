@@ -2,6 +2,45 @@
 
 ## Unreleased changes
 
+## v1.0.0.0 - 2026-07-03
+
+### Added
+
+- Add `file-proxy-client` for direct file operations without calling
+  `periodic run` manually.
+- Add client commands for `get`, `put`, `ls`, `stat`, `sha256`, `mkdir`, `mv`,
+  `cp`, `rm`, `upload`, `download`, `upload-dir`, and `download-dir`.
+- Add resumable upload support with chunk tracking, SHA-256 verification, and
+  final publish only after checksum validation.
+- Add resumable download support with partial files, progress metadata, resume
+  handling, and final SHA-256 verification.
+- Add recursive directory upload and download commands with optional hidden-file
+  exclusion.
+- Add worker APIs for path metadata, SHA-256 manifests, directory creation,
+  move/copy/delete, resumable upload, and resumable download.
+- Add configurable worker function prefixes through `--prefix` and
+  `PERIODIC_FUNC_PREFIX`.
+- Add Hspec coverage for path safety, file APIs, resumable transfers, client
+  helper behavior, and function prefixing.
+
+### Changed
+
+- Split the package library into `FileProxy.Client` and `FileProxy.Worker`
+  modules.
+- Rename the worker executable entrypoint to `file-proxy-worker.hs` while
+  keeping the `file-proxy` executable name.
+- Default transfer chunk size to 1 MiB.
+- Document JSON response formats, client commands, resumable transfer behavior,
+  and worker/client prefix usage.
+- Package both `file-proxy` and `file-proxy-client` in platform build outputs
+  and macOS bundles.
+
+### Fixed
+
+- Make client transfer locks portable by using temporary-directory lock files.
+- Improve resumable transfer stability for interrupted or repeated chunk
+  operations.
+
 ## v0.1.0.0 - 2026-07-03
 
 First release of `file-proxy`, a Periodic worker for exposing file operations
