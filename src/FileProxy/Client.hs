@@ -87,7 +87,7 @@ data Command
   | CmdDownload FilePath FilePath Int Int
 
 defaultChunkSize :: Int
-defaultChunkSize = 8 * 1024 * 1024
+defaultChunkSize = 1024 * 1024
 
 clientMain :: IO ()
 clientMain = do

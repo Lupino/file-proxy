@@ -86,7 +86,7 @@ Paths are relative to the worker root. Absolute paths, `..` traversal, and `.fil
 Use `upload` for large files. It stores temporary state under the worker root in `.file-proxy/uploads/` and publishes the target file only after the final SHA-256 matches.
 
 ```bash
-file-proxy-client upload ./big.bin remote/big.bin --chunk-size 8388608 --timeout 300
+file-proxy-client upload ./big.bin remote/big.bin --chunk-size 1048576 --timeout 300
 ```
 
 The client calls `upload-begin`, `upload-chunk`, and `upload-finish` internally. Chunk uploads remain idempotent when the same offset, size, and chunk SHA-256 are sent again. Conflicting overlapping chunks return `chunk_conflict`.
@@ -98,7 +98,7 @@ Use `--timeout` when sending large payloads.
 Use `download` for large files. The client writes to `<local>.part`, resumes from that partial file if present, and verifies the completed local file against the server SHA-256 before renaming it into place.
 
 ```bash
-file-proxy-client download remote/big.bin ./big.bin --chunk-size 8388608 --timeout 300
+file-proxy-client download remote/big.bin ./big.bin --chunk-size 1048576 --timeout 300
 ```
 
 The worker still serves `download-info` and `download-chunk` internally. `download-chunk` returns raw file bytes on success. If a requested range extends past EOF, it returns the remaining bytes. Offsets past EOF are rejected with `range_out_of_bounds`.

@@ -74,7 +74,7 @@ file-proxy-client rm path/to/dir --recursive
 Use resumable upload for every file larger than 1 MiB instead of a single `put`.
 
 ```bash
-file-proxy-client upload ./big.bin remote/big.bin --chunk-size 8388608 --timeout 300
+file-proxy-client upload ./big.bin remote/big.bin --chunk-size 1048576 --timeout 300
 ```
 
 The client computes the full-file SHA-256, begins or resumes the upload, sends chunks, and finishes only after server-side verification passes.
@@ -86,7 +86,7 @@ Use a resumable/ranged download flow for every file larger than 1 MiB.
 Read metadata before downloading chunks:
 
 ```bash
-file-proxy-client download remote/big.bin ./big.bin --chunk-size 8388608 --timeout 300
+file-proxy-client download remote/big.bin ./big.bin --chunk-size 1048576 --timeout 300
 ```
 
 The client writes to `./big.bin.part`, resumes from that partial file if present, and verifies SHA-256 before renaming it into place.

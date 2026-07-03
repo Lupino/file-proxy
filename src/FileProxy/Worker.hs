@@ -669,7 +669,7 @@ apiUploadBegin cfg raw begin@UploadBegin {..} = do
       | maybe False (<= 0) beginChunkSize -> pure $ err "invalid_chunk_size" "chunkSize must be positive"
       | otherwise -> do
       let uploadId = uploadIdFor raw begin
-          chunkSize = fromMaybe (8 * 1024 * 1024) beginChunkSize
+          chunkSize = fromMaybe (1024 * 1024) beginChunkSize
           meta = UploadMeta uploadId raw beginSize beginSha256 chunkSize
           (dir, metaFile, dataFile) = uploadPaths cfg uploadId
       createDirectoryIfMissing True dir
