@@ -25,6 +25,7 @@ dependencies:
 library:
   source-dirs: src
   dependencies:
+  - aeson
   - periodic-client
   - periodic-common
   - filepath
@@ -32,11 +33,13 @@ library:
   - unliftio
   - optparse-applicative
   - directory
+  - time
   - metro
   - metro-socket
+  - metro-transport-crypto
 
 executables:
-  file-proxy-exe:
+  file-proxy:
     main:                Main.hs
     source-dirs:         app
     ghc-options:

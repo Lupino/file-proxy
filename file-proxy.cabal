@@ -31,19 +31,22 @@ library
   hs-source-dirs:
       src
   build-depends:
-      base >=4.7 && <5
+      aeson
+    , base >=4.7 && <5
     , bytestring
     , directory
     , filepath
     , metro
     , metro-socket
+    , metro-transport-crypto
     , optparse-applicative
     , periodic-client
     , periodic-common
+    , time
     , unliftio
   default-language: Haskell2010
 
-executable file-proxy-exe
+executable file-proxy
   main-is: Main.hs
   other-modules:
       Paths_file_proxy
