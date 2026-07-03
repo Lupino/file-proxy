@@ -1,23 +1,29 @@
 ---
 name: file-proxy
-description: Use file-proxy through the Periodic client. Trigger when Codex needs to call file-proxy worker functions with periodic run, including get-file, put-file, and get-directory commands, job-name path semantics, workload file upload syntax, and get-directory JSON response interpretation.
+description: Use file-proxy through the Periodic client. Trigger when Codex needs to call file-proxy worker functions with periodic run, including file operations, sha256sum, and resumable upload commands.
 ---
 
 # File Proxy Calls
 
 Use this skill only for calling an already running `file-proxy` worker through `periodic`.
 
-## Functions
+## Response Format
 
-`file-proxy` exposes three Periodic functions:
+Most functions return JSON:
 
-- `get-file`: read a file.
-- `put-file`: write a file.
-- `get-directory`: list one directory level.
+```json
+{"ok":true}
+```
 
-The job name is the target path relative to the worker root.
+or:
 
-## Commands
+```json
+{"ok":false,"error":{"code":"not_found","message":"path does not exist"}}
+```
+
+`get-file` returns raw file bytes on success.
+
+## File Operations
 
 Read a file:
 
@@ -25,55 +31,78 @@ Read a file:
 periodic run get-file path/to/file.txt
 ```
 
-Write literal content:
+Write a file:
 
 ```bash
-periodic run put-file path/to/file.txt --workload 'content'
-```
-
-Write local file content:
-
-```bash
-periodic run put-file path/to/file.txt --workload @file-path
+periodic run put-file path/to/file.txt --workload @file-path --timeout 300
 ```
 
 List a directory:
 
 ```bash
 periodic run get-directory path/to/dir
+periodic run get-directory path/to/dir --workload '{"recursive":true,"maxDepth":2}'
 ```
+
+Get metadata or checksums:
+
+```bash
+periodic run stat-path path/to/file.txt
+periodic run sha256sum path/to/file.txt
+periodic run sha256sum path/to/dir --workload '{"recursive":true}'
+```
+
+Manage paths:
+
+```bash
+periodic run make-directory path/to/dir
+periodic run move-path old/name.txt --workload '{"to":"new/name.txt","overwrite":false}'
+periodic run copy-path src/name.txt --workload '{"to":"dst/name.txt","overwrite":false}'
+periodic run delete-path path/to/file.txt
+periodic run delete-path path/to/dir --workload '{"recursive":true}'
+```
+
+`delete-path` only works when the worker was started with `--allow-delete` or `FILE_PROXY_ALLOW_DELETE=true`.
+
+## Resumable Upload
+
+Use resumable upload for large files instead of a single `put-file`.
+
+Begin or resume:
+
+```bash
+periodic run upload-begin remote/big.bin --workload '{"size":52428800,"sha256":"<full-file-sha256>","chunkSize":8388608}'
+```
+
+Upload a chunk:
+
+```bash
+periodic run upload-chunk '<uploadId>/<offset>/<chunk-sha256>' --workload @chunk.bin --timeout 300
+```
+
+Check status:
+
+```bash
+periodic run upload-status <uploadId>
+```
+
+Finish:
+
+```bash
+periodic run upload-finish <uploadId>
+```
+
+Abort:
+
+```bash
+periodic run upload-abort <uploadId>
+```
+
+Chunk uploads are idempotent when the same offset, size, and chunk SHA-256 are sent again. Conflicting overlapping chunks return `chunk_conflict`.
 
 ## Path Semantics
 
-- `path/to/file.txt` is the target path inside the file-proxy worker root.
+- Job names are paths relative to the worker root.
+- Absolute paths, `..` traversal, and `.file-proxy` internals are rejected.
 - `@file-path` is read by the local `periodic` client and sent as workload bytes.
-- Do not include `..` traversal assumptions; file-proxy normalizes paths before joining with its root.
-
-## get-directory Response
-
-`get-directory` returns direct children only, not recursive contents.
-
-Directory entry:
-
-```json
-{
-  "name": "src",
-  "type": "directory",
-  "modifiedAt": "2026-07-02T15:00:00Z",
-  "fileCount": 1,
-  "children": []
-}
-```
-
-File entry:
-
-```json
-{
-  "name": "README.md",
-  "type": "file",
-  "size": 13,
-  "modifiedAt": "2026-07-02T15:00:00Z"
-}
-```
-
-`fileCount` is the number of direct regular files inside that directory, not a recursive total.
+- `periodic run` defaults to `--timeout 10`; set a larger timeout for `put-file` and `upload-chunk` with large payloads.

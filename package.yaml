@@ -26,10 +26,12 @@ library:
   source-dirs: src
   dependencies:
   - aeson
+  - base16-bytestring
   - periodic-client
   - periodic-common
   - filepath
   - bytestring
+  - cryptohash-sha256
   - unliftio
   - optparse-applicative
   - directory
@@ -59,3 +61,10 @@ tests:
     - -with-rtsopts=-N
     dependencies:
     - file-proxy
+    - aeson
+    - bytestring
+    - directory
+    - filepath
+    - hspec
+    - temporary
+    - text
