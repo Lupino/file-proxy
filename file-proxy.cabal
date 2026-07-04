@@ -26,6 +26,7 @@ source-repository head
 library
   exposed-modules:
       FileProxy.Client
+      FileProxy.Version
       FileProxy.Worker
   other-modules:
       Paths_file_proxy

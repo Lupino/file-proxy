@@ -26,6 +26,7 @@ library:
   source-dirs: src
   exposed-modules:
   - FileProxy.Client
+  - FileProxy.Version
   - FileProxy.Worker
   dependencies:
   - aeson

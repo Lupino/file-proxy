@@ -32,6 +32,8 @@ import qualified Data.ByteString.Lazy.Char8 as LBC
 import           Data.Maybe             (fromMaybe)
 import           Data.String            (fromString)
 import           Data.Time.Clock.POSIX  (getPOSIXTime)
+import           FileProxy.Version      (fileProxyClientVersionText,
+                                         versionedProgramName)
 import           FileProxy.Worker       (prefixFunctionName, sha256Bytes,
                                          sha256File)
 import           Metro.Class            (Transport)
@@ -145,8 +147,15 @@ parserInfo
   -> Maybe String
   -> ParserInfo GlobalOptions
 parserInfo envHost envRsaPrivate envRsaPublic envRsaMode envClientName envClientToken envFuncPrefix =
-  info (globalParser envHost envRsaPrivate envRsaPublic envRsaMode envClientName envClientToken envFuncPrefix <**> helper)
-    (fullDesc <> header "file-proxy-client - file-oriented client for a file-proxy worker")
+  info
+    (helper <*> versionOption <*> globalParser envHost envRsaPrivate envRsaPublic envRsaMode envClientName envClientToken envFuncPrefix)
+    (fullDesc <> header clientHeader)
+  where
+    clientHeader = versionedProgramName "file-proxy-client" ++ " - file-oriented client for a file-proxy worker"
+
+versionOption :: Parser (a -> a)
+versionOption =
+  infoOption fileProxyClientVersionText (long "version" <> help "Show version")
 
 globalParser
   :: Maybe String

@@ -48,6 +48,7 @@ import           Data.List             (sortOn)
 import           Data.Maybe            (fromMaybe)
 import           Data.String           (fromString)
 import           Data.Time.Clock       (UTCTime)
+import           FileProxy.Version     (packageVersion, versionedProgramName)
 import           Metro.Class           (Transport)
 import qualified Metro.TP.RSA          as RSA (RSAMode (AES), configClient)
 import           Metro.TP.Socket       (socket)
@@ -153,6 +154,7 @@ someFunc = do
   parsedFlags@Flags {..} <- execParser $ opts envHost envClientName envClientToken envRsaPrivate envRsaPublic envRsaMode envAllowDelete envFuncPrefix
   auth <- requireAuthPair parsedFlags
   let cfg = ApiConfig rootPath allowDelete
+  IO.hPutStrLn IO.stderr $ "INFO file-proxy version=" ++ packageVersion
 
   case rsaPrivatePath of
     "" -> startWorkerTWithSignalWithAuth auth Nothing (pure ()) (socket hostPort) $ registerWorkers cfg funcPrefix workThread
@@ -161,7 +163,8 @@ someFunc = do
       startWorkerTWithSignalWithAuth auth Nothing (pure ()) (genTP $ socket hostPort) $ registerWorkers cfg funcPrefix workThread
   where
     opts h n t priv pub mode del prefix =
-      info (flags h n t priv pub mode del prefix <**> helper) (fullDesc <> header "file-proxy - a file proxy worker" )
+      info (flags h n t priv pub mode del prefix <**> helper) (fullDesc <> header workerHeader)
+    workerHeader = versionedProgramName "file-proxy" ++ " - a file proxy worker"
 
 registerWorkers :: (Transport tp, MonadUnliftIO m) => ApiConfig -> String -> Int -> WorkerT tp m ()
 registerWorkers cfg prefix thread = do
