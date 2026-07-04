@@ -49,29 +49,25 @@ $(OUT):
 package: $(OUT)
 	cd dist/$(PLATFORM) && tar cjvf ../file-proxy-$(SYSTEM)-$(PLATFORM).tar.bz2 file-proxy*
 
-dist/bundle/bin/%: bin/%
-	@mkdir -p dist/bundle/bin
-	@mkdir -p $(BUNDLE_LIB)
-	cp $< $@
-	nix-shell -p macdylibbundler --run "$(BUNDLE) -x $@"
-	echo sudo xattr -d com.apple.quarantine $< >> dist/bundle/install.sh
-
 macos-build:
-	stack install --local-bin-path bin
+	stack install --local-bin-path $(BUNDLE_BIN)
+	@mkdir -p $(BUNDLE_LIB)
+	@for F in $(BUNDLE_BINS); do \
+		nix-shell -p macdylibbundler --run "$(BUNDLE) -x $$F"; \
+		echo sudo xattr -d com.apple.quarantine $$F >> dist/bundle/install.sh; \
+	done
 
 macos-install:
 	rm -rf dist/bundle
 	@mkdir -p dist/bundle
 	echo '#!/usr/bin/env bash' > dist/bundle/install.sh
 
-macos-bundle: macos-install
+macos-bundle: macos-install macos-build
 	$(MAKE) $(BUNDLE_BINS)
 	$(MAKE) macos-verify
 	cd dist/bundle && find lib -type f | while read F; do echo sudo xattr -d com.apple.quarantine $$F >> install.sh; done
 	chmod +x dist/bundle/install.sh
 	cd dist/bundle && tar cjvf ../file-proxy-macos-aarch64-bundle.tar.bz2 .
-
-macos-build-bundle: macos-build macos-bundle
 
 macos-static: macos-bundle
 
@@ -98,7 +94,6 @@ help:
 	@echo make PLATFORM=aarch64-multiplatform-musl
 	@echo make PLATFORM=mingwW64
 	@echo make macos-bundle
-	@echo make macos-build-bundle
 	@echo make macos-static
 	@echo make clean
 	@echo make update-sha256
