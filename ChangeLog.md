@@ -2,6 +2,29 @@
 
 ## Unreleased changes
 
+## v1.1.0.0 - 2026-07-04
+
+### Changed
+
+- Route path-bearing client operations through unique Periodic job names and
+  carry file paths in JSON workloads instead of job names.
+- Switch `get`, `put`, `upload-dir`, and `download-dir` to checksum-verified
+  upload/download flows instead of raw single-shot file transfer functions.
+- Remove obsolete `get-file` and `put-file` worker registrations.
+- Allow `ls` on a file path to return file metadata through `entry` and a
+  single-item `entries` array.
+- Keep invalid JSON diagnostics from echoing raw response bodies that could
+  contain parseable JSON fragments.
+
+### Fixed
+
+- Prevent expired or malformed worker responses from being written as downloaded
+  file contents.
+- Avoid path reuse as Periodic job names for file path operations, reducing the
+  chance of stale or expired job results colliding with later requests.
+- Ensure stdout remains reserved for final machine-readable JSON responses while
+  transfer progress and diagnostics stay on stderr.
+
 ## v1.0.0.0 - 2026-07-03
 
 ### Added
