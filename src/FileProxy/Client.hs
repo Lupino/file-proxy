@@ -9,6 +9,7 @@ module FileProxy.Client
   , downloadMetaPath
   , downloadPartPath
   , finishDownload
+  , formatInvalidJsonResponse
   , isHiddenPath
   , nextChunkSize
   , prepareDownloadPart
@@ -19,6 +20,7 @@ module FileProxy.Client
 import           Control.Monad          (forM, forM_, unless, when)
 import           Control.Monad.IO.Class (liftIO)
 import qualified Control.Exception      as E
+import           Data.Char              (isSpace)
 import           Data.Aeson             (FromJSON (..), ToJSON (..), Value,
                                          eitherDecodeStrict', encode, object,
                                          withObject, (.:), (.:?), (.=))
@@ -29,6 +31,7 @@ import qualified Data.ByteString.Lazy   as LB
 import qualified Data.ByteString.Lazy.Char8 as LBC
 import           Data.Maybe             (fromMaybe)
 import           Data.String            (fromString)
+import           Data.Time.Clock.POSIX  (getPOSIXTime)
 import           FileProxy.Worker       (prefixFunctionName, sha256Bytes,
                                          sha256File)
 import           Metro.Class            (Transport)
@@ -167,8 +170,8 @@ globalParser envHost envRsaPrivate envRsaPublic envRsaMode envClientName envClie
 
 commandParser :: Parser Command
 commandParser = hsubparser
-  ( command "get" (info (getParser <**> helper) (progDesc "Download one file with get-file"))
- <> command "put" (info (putParser <**> helper) (progDesc "Upload one file with put-file"))
+  ( command "get" (info (getParser <**> helper) (progDesc "Download one file with checksum verification"))
+ <> command "put" (info (putParser <**> helper) (progDesc "Upload one file with checksum verification"))
  <> command "ls" (info (listParser <**> helper) (progDesc "List a remote directory"))
  <> command "stat" (info (statParser <**> helper) (progDesc "Read remote path metadata"))
  <> command "sha256" (info (sha256Parser <**> helper) (progDesc "Calculate remote SHA-256"))
@@ -234,28 +237,34 @@ runWithConnection GlobalOptions {..} clientAction = do
       runClientT clientEnv clientAction
 
 processCommand :: Transport tp => String -> Command -> ClientT tp IO ()
-processCommand prefix (CmdGet remote local timeoutSecs) = do
-  bs <- runRawJob prefix "get-file" remote emptyWorkload timeoutSecs
-  liftClientIO $ do
-    createDirectoryIfMissing True $ takeDirectory local
-    BS.writeFile local bs
-processCommand prefix (CmdPut local remote timeoutSecs) = do
-  bs <- liftClientIO $ BS.readFile local
-  runJsonJob prefix "put-file" remote (Workload bs) timeoutSecs >>= liftClientIO . printBytesLn
+processCommand prefix (CmdGet remote local timeoutSecs) =
+  downloadOneFile False prefix remote local defaultChunkSize timeoutSecs
+processCommand prefix (CmdPut local remote timeoutSecs) =
+  uploadOneFile True prefix local remote defaultChunkSize timeoutSecs
 processCommand prefix (CmdList remote recursive maxDepth timeoutSecs) =
-  runJsonJob prefix "get-directory" remote (jsonWorkload $ object ["recursive" .= recursive, "maxDepth" .= maxDepth]) timeoutSecs >>= liftClientIO . printBytesLn
+  runPathJsonJob prefix "get-directory" remote
+    (object ["path" .= remote, "recursive" .= recursive, "maxDepth" .= maxDepth])
+    timeoutSecs >>= liftClientIO . printBytesLn
 processCommand prefix (CmdStat remote timeoutSecs) =
-  runJsonJob prefix "stat-path" remote emptyWorkload timeoutSecs >>= liftClientIO . printBytesLn
+  runPathJsonJob prefix "stat-path" remote (object ["path" .= remote]) timeoutSecs >>= liftClientIO . printBytesLn
 processCommand prefix (CmdSha256 remote recursive timeoutSecs) =
-  runJsonJob prefix "sha256sum" remote (jsonWorkload $ object ["recursive" .= recursive]) timeoutSecs >>= liftClientIO . printBytesLn
+  runPathJsonJob prefix "sha256sum" remote
+    (object ["path" .= remote, "recursive" .= recursive])
+    timeoutSecs >>= liftClientIO . printBytesLn
 processCommand prefix (CmdMkdir remote timeoutSecs) =
-  runJsonJob prefix "make-directory" remote emptyWorkload timeoutSecs >>= liftClientIO . printBytesLn
+  runPathJsonJob prefix "make-directory" remote (object ["path" .= remote]) timeoutSecs >>= liftClientIO . printBytesLn
 processCommand prefix (CmdMove from to overwrite timeoutSecs) =
-  runJsonJob prefix "move-path" from (jsonWorkload $ object ["to" .= to, "overwrite" .= overwrite]) timeoutSecs >>= liftClientIO . printBytesLn
+  runPathJsonJob prefix "move-path" from
+    (object ["from" .= from, "to" .= to, "overwrite" .= overwrite])
+    timeoutSecs >>= liftClientIO . printBytesLn
 processCommand prefix (CmdCopy from to overwrite recursive timeoutSecs) =
-  runJsonJob prefix "copy-path" from (jsonWorkload $ object ["to" .= to, "overwrite" .= overwrite, "recursive" .= recursive]) timeoutSecs >>= liftClientIO . printBytesLn
+  runPathJsonJob prefix "copy-path" from
+    (object ["from" .= from, "to" .= to, "overwrite" .= overwrite, "recursive" .= recursive])
+    timeoutSecs >>= liftClientIO . printBytesLn
 processCommand prefix (CmdRemove remote recursive timeoutSecs) =
-  runJsonJob prefix "delete-path" remote (jsonWorkload $ object ["recursive" .= recursive]) timeoutSecs >>= liftClientIO . printBytesLn
+  runPathJsonJob prefix "delete-path" remote
+    (object ["path" .= remote, "recursive" .= recursive])
+    timeoutSecs >>= liftClientIO . printBytesLn
 processCommand prefix (CmdUpload local remote chunkSize timeoutSecs) =
   uploadFile prefix local remote chunkSize timeoutSecs
 processCommand prefix (CmdDownload remote local chunkSize timeoutSecs) =
@@ -279,7 +288,10 @@ uploadOneFileLocked :: Transport tp => Bool -> String -> FilePath -> FilePath ->
 uploadOneFileLocked printResult prefix local remote chunkSize timeoutSecs = do
   fileSize <- liftClientIO $ getFileSize local
   digest <- liftClientIO $ sha256File local
-  beginBytes <- runJsonJob prefix "upload-begin" remote (jsonWorkload $ object ["size" .= fileSize, "sha256" .= digest, "chunkSize" .= chunkSize]) timeoutSecs
+  beginJob <- liftClientIO $ uniqueJobName "upload-begin" $ remote ++ "\n" ++ show fileSize ++ "\n" ++ digest
+  beginBytes <- runJsonJob prefix "upload-begin" beginJob
+    (jsonWorkload $ object ["path" .= remote, "size" .= fileSize, "sha256" .= digest, "chunkSize" .= chunkSize])
+    timeoutSecs
   beginRsp <- liftClientIO $ decodeOkResponse beginBytes
   uploadId <- liftClientIO $ requireField "uploadId" beginRsp
   startOffset <- liftClientIO $ requireField "nextOffset" beginRsp
@@ -313,7 +325,7 @@ downloadOneFile :: Transport tp => Bool -> String -> FilePath -> FilePath -> Int
 downloadOneFile printResult prefix remote local chunkSize timeoutSecs = do
   validateChunkSize chunkSize
   withDownloadLock local do
-    infoBytes <- runJsonJob prefix "download-info" remote emptyWorkload timeoutSecs
+    infoBytes <- runPathJsonJob prefix "download-info" remote (object ["path" .= remote]) timeoutSecs
     response <- liftClientIO $ decodeOkResponse infoBytes
     remoteSize <- liftClientIO $ requireField "size" response
     remoteSha <- liftClientIO $ requireField "sha256" response
@@ -329,7 +341,10 @@ downloadOneFile printResult prefix remote local chunkSize timeoutSecs = do
       | offset >= remoteSize = pure ()
       | otherwise = do
           let size = nextChunkSize chunkSize offset remoteSize
-          chunk <- runRawJob prefix "download-chunk" remote (jsonWorkload $ object ["offset" .= offset, "size" .= size]) timeoutSecs
+          chunkJob <- liftClientIO $ uniqueJobName "download-chunk" $ remote ++ "\n" ++ show offset
+          chunk <- runRawJob prefix "download-chunk" chunkJob
+            (jsonWorkload $ object ["path" .= remote, "offset" .= offset, "size" .= size])
+            timeoutSecs
           when (BS.null chunk) $ liftClientIO $ die "download returned an empty chunk before EOF"
           let nextOffset = offset + fromIntegral (BS.length chunk)
           liftClientIO $ do
@@ -348,20 +363,14 @@ uploadDirectory prefix localRoot remoteRoot excludeHidden chunkSize timeoutSecs 
   liftClientIO $ logTransfer $ "upload-dir start local=" ++ localRoot ++ " remote=" ++ remoteRoot ++ " directories=" ++ show (length dirs) ++ " files=" ++ show (length files) ++ " excludeHidden=" ++ show excludeHidden
   forM_ dirs \rel -> do
     liftClientIO $ logTransfer $ "mkdir remote=" ++ joinRemotePath remoteRoot rel
-    runJsonJob prefix "make-directory" (joinRemotePath remoteRoot rel) emptyWorkload timeoutSecs
+    let remote = joinRemotePath remoteRoot rel
+    runPathJsonJob prefix "make-directory" remote (object ["path" .= remote]) timeoutSecs
   results <- forM files \(local, rel) -> do
     let remote = joinRemotePath remoteRoot rel
     fileSize <- liftClientIO $ getFileSize local
-    if fileSize > fromIntegral defaultChunkSize
-      then do
-        uploadOneFile False prefix local remote chunkSize timeoutSecs
-        liftClientIO $ logTransfer $ "uploaded remote=" ++ remote ++ " local=" ++ local ++ " size=" ++ humanBytes fileSize ++ " mode=resumable"
-        pure True
-      else do
-        bs <- liftClientIO $ BS.readFile local
-        _ <- runJsonJob prefix "put-file" remote (Workload bs) timeoutSecs
-        liftClientIO $ logTransfer $ "uploaded remote=" ++ remote ++ " local=" ++ local ++ " size=" ++ humanBytes fileSize ++ " mode=single"
-        pure False
+    uploadOneFile False prefix local remote chunkSize timeoutSecs
+    liftClientIO $ logTransfer $ "uploaded remote=" ++ remote ++ " local=" ++ local ++ " size=" ++ humanBytes fileSize ++ " mode=verified"
+    pure $ fileSize > fromIntegral defaultChunkSize
   liftClientIO $ logTransfer $ "upload-dir done files=" ++ show (length files) ++ " largeFiles=" ++ show (length (filter id results))
   liftClientIO $ LBC.putStrLn $ encode $ object
     [ "ok" .= True
@@ -376,7 +385,9 @@ uploadDirectory prefix localRoot remoteRoot excludeHidden chunkSize timeoutSecs 
 downloadDirectory :: Transport tp => String -> FilePath -> FilePath -> Bool -> Int -> Int -> ClientT tp IO ()
 downloadDirectory prefix remoteRoot localRoot excludeHidden chunkSize timeoutSecs = do
   validateChunkSize chunkSize
-  rspBytes <- runJsonJob prefix "get-directory" remoteRoot (jsonWorkload $ object ["recursive" .= True, "maxDepth" .= (Nothing :: Maybe Int)]) timeoutSecs
+  rspBytes <- runPathJsonJob prefix "get-directory" remoteRoot
+    (object ["path" .= remoteRoot, "recursive" .= True, "maxDepth" .= (Nothing :: Maybe Int)])
+    timeoutSecs
   rsp <- liftClientIO $ decodeOkResponse rspBytes
   entries <- liftClientIO $ requireField "entries" rsp
   let filteredEntries = filterRemoteEntries excludeHidden entries
@@ -393,17 +404,10 @@ downloadDirectory prefix remoteRoot localRoot excludeHidden chunkSize timeoutSec
         local = localRoot </> relativeRemotePath remoteRoot remote
         size = fromMaybe 0 $ remoteEntrySize entry
     liftClientIO $ createDirectoryIfMissing True $ takeDirectory local
-    if size > fromIntegral defaultChunkSize
-      then do
-        downloadOneFile False prefix remote local chunkSize timeoutSecs
-        liftClientIO $ logTransfer $ "downloaded remote=" ++ remote ++ " local=" ++ local ++ " size=" ++ humanBytes size ++ " mode=resumable"
-        pure True
-      else do
-        bs <- runRawJob prefix "get-file" remote emptyWorkload timeoutSecs
-        liftClientIO $ BS.writeFile local bs
-        liftClientIO $ verifyDownloadedFile local entry
-        liftClientIO $ logTransfer $ "downloaded remote=" ++ remote ++ " local=" ++ local ++ " size=" ++ humanBytes size ++ " mode=single"
-        pure False
+    downloadOneFile False prefix remote local chunkSize timeoutSecs
+    liftClientIO $ verifyDownloadedFile local entry
+    liftClientIO $ logTransfer $ "downloaded remote=" ++ remote ++ " local=" ++ local ++ " size=" ++ humanBytes size ++ " mode=verified"
+    pure $ size > fromIntegral defaultChunkSize
   liftClientIO $ logTransfer $ "download-dir done files=" ++ show (length files) ++ " largeFiles=" ++ show (length (filter id results))
   liftClientIO $ LBC.putStrLn $ encode $ object
     [ "ok" .= True
@@ -547,6 +551,11 @@ runJsonJob prefix func job wl timeoutSecs = do
   _ <- liftClientIO $ decodeOkResponse bs
   pure bs
 
+runPathJsonJob :: Transport tp => String -> String -> FilePath -> Value -> Int -> ClientT tp IO BS.ByteString
+runPathJsonJob prefix func salt payload timeoutSecs = do
+  job <- liftClientIO $ uniqueJobName func salt
+  runJsonJob prefix func job (jsonWorkload payload) timeoutSecs
+
 runRawJob :: Transport tp => String -> String -> FilePath -> Workload -> Int -> ClientT tp IO BS.ByteString
 runRawJob prefix func job wl timeoutSecs = do
   let fullFunc = prefixFunctionName prefix func
@@ -564,7 +573,7 @@ jsonWorkload = Workload . LB.toStrict . encode
 decodeOkResponse :: BS.ByteString -> IO Value
 decodeOkResponse bs =
   case eitherDecodeStrict' bs of
-    Left e -> die $ "invalid JSON response: " ++ e
+    Left e -> die $ formatInvalidJsonResponse e bs
     Right v -> do
       okValue <- requireField "ok" v
       if okValue
@@ -589,6 +598,16 @@ formatApiError responseValue =
     message <- fieldValue "message" errorValue
     pure $ code ++ ": " ++ message
 
+formatInvalidJsonResponse :: String -> BS.ByteString -> String
+formatInvalidJsonResponse parseError bs =
+  case B.unpack $ trimResponse bs of
+    "" -> "empty response from file-proxy worker"
+    "expired" -> "file-proxy worker job expired before returning JSON; retry with a larger --timeout or check worker logs"
+    raw -> "invalid JSON response from file-proxy worker (" ++ show (length raw) ++ " bytes): " ++ parseError
+
+trimResponse :: BS.ByteString -> BS.ByteString
+trimResponse = B.dropWhileEnd isSpace . B.dropWhile isSpace
+
 validateChunkSize :: Int -> ClientT tp IO ()
 validateChunkSize size =
   when (size <= 0) $ liftClientIO $ die "chunk size must be positive"
@@ -605,6 +624,11 @@ readFileChunk path offset size =
 
 uploadLockKey :: FilePath -> String
 uploadLockKey remote = "upload-" ++ sha256Bytes (B.pack remote)
+
+uniqueJobName :: String -> String -> IO String
+uniqueJobName label salt = do
+  now <- getPOSIXTime
+  pure $ label ++ "-" ++ take 32 (sha256Bytes $ B.pack $ salt ++ "\n" ++ show now)
 
 acquireNamedLock :: String -> String -> IO ()
 acquireNamedLock label lockPath = do

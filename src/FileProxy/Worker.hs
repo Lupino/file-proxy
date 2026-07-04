@@ -165,8 +165,6 @@ someFunc = do
 
 registerWorkers :: (Transport tp, MonadUnliftIO m) => ApiConfig -> String -> Int -> WorkerT tp m ()
 registerWorkers cfg prefix thread = do
-  void $ addFunc (func "get-file") $ getFile cfg
-  void $ addFunc (func "put-file") $ putFile cfg
   void $ addFunc (func "get-directory") $ getDirectory cfg
   void $ addFunc (func "stat-path") $ statPath cfg
   void $ addFunc (func "sha256sum") $ sha256Sum cfg
@@ -231,6 +229,7 @@ instance ToJSON FileEntry where
 data ListOptions = ListOptions
   { listRecursive :: Bool
   , listMaxDepth  :: Maybe Int
+  , listPath      :: Maybe FilePath
   } deriving (Eq, Show)
 
 instance FromJSON ListOptions where
@@ -238,29 +237,46 @@ instance FromJSON ListOptions where
     ListOptions
       <$> fmap (fromMaybe False) (o .:? "recursive")
       <*> o .:? "maxDepth"
+      <*> o .:? "path"
 
 defaultListOptions :: ListOptions
-defaultListOptions = ListOptions False Nothing
+defaultListOptions = ListOptions False Nothing Nothing
+
+data PathOptions = PathOptions
+  { optionPath :: Maybe FilePath
+  } deriving (Eq, Show)
+
+instance FromJSON PathOptions where
+  parseJSON = withObject "PathOptions" $ \o ->
+    PathOptions <$> o .:? "path"
 
 data DeleteOptions = DeleteOptions
   { deleteRecursive :: Bool
+  , deleteOptionPath :: Maybe FilePath
   } deriving (Eq, Show)
 
 instance FromJSON DeleteOptions where
   parseJSON = withObject "DeleteOptions" $ \o ->
-    DeleteOptions <$> fmap (fromMaybe False) (o .:? "recursive")
+    DeleteOptions
+      <$> fmap (fromMaybe False) (o .:? "recursive")
+      <*> o .:? "path"
 
 data MoveOptions = MoveOptions
-  { moveTo        :: FilePath
+  { moveFrom      :: Maybe FilePath
+  , moveTo        :: FilePath
   , moveOverwrite :: Bool
   } deriving (Eq, Show)
 
 instance FromJSON MoveOptions where
   parseJSON = withObject "MoveOptions" $ \o ->
-    MoveOptions <$> o .: "to" <*> fmap (fromMaybe False) (o .:? "overwrite")
+    MoveOptions
+      <$> o .:? "from"
+      <*> o .: "to"
+      <*> fmap (fromMaybe False) (o .:? "overwrite")
 
 data CopyOptions = CopyOptions
-  { copyTo        :: FilePath
+  { copyFrom      :: Maybe FilePath
+  , copyTo        :: FilePath
   , copyOverwrite :: Bool
   , copyRecursive :: Bool
   } deriving (Eq, Show)
@@ -268,28 +284,35 @@ data CopyOptions = CopyOptions
 instance FromJSON CopyOptions where
   parseJSON = withObject "CopyOptions" $ \o ->
     CopyOptions
-      <$> o .: "to"
+      <$> o .:? "from"
+      <*> o .: "to"
       <*> fmap (fromMaybe False) (o .:? "overwrite")
       <*> fmap (fromMaybe False) (o .:? "recursive")
 
 data DownloadRange = DownloadRange
   { downloadOffset :: Integer
   , downloadSize   :: Integer
+  , downloadPath   :: Maybe FilePath
   } deriving (Eq, Show)
 
 instance FromJSON DownloadRange where
   parseJSON = withObject "DownloadRange" $ \o ->
-    DownloadRange <$> o .: "offset" <*> o .: "size"
+    DownloadRange <$> o .: "offset" <*> o .: "size" <*> o .:? "path"
 
 data UploadBegin = UploadBegin
   { beginSize      :: Integer
   , beginSha256    :: String
   , beginChunkSize :: Maybe Int
+  , beginPath      :: Maybe FilePath
   } deriving (Eq, Show)
 
 instance FromJSON UploadBegin where
   parseJSON = withObject "UploadBegin" $ \o ->
-    UploadBegin <$> o .: "size" <*> o .: "sha256" <*> o .:? "chunkSize"
+    UploadBegin
+      <$> o .: "size"
+      <*> o .: "sha256"
+      <*> o .:? "chunkSize"
+      <*> o .:? "path"
 
 data UploadMeta = UploadMeta
   { metaUploadId  :: String
@@ -510,12 +533,17 @@ apiListDirectory cfg raw opts = do
   case resolved of
     Left e -> pure $ err (errorCode e) (errorMessage e)
     Right path -> do
+      isFile <- doesFileExist path
       isDir <- doesDirectoryExist path
-      if not isDir
-        then pure $ err "not_directory" "path is not a directory"
-        else do
-          entries <- listEntries (cfgRoot cfg) path opts 0
-          pure $ ok ["path" .= raw, "entries" .= entries]
+      if isFile then do
+        meta <- metadataFor (cfgRoot cfg) path
+        pure $ case meta of
+          Left e -> err (errorCode e) (errorMessage e)
+          Right entry -> ok ["path" .= raw, "entry" .= entry, "entries" .= [entry]]
+      else if isDir then do
+        entries <- listEntries (cfgRoot cfg) path opts 0
+        pure $ ok ["path" .= raw, "entries" .= entries]
+      else pure $ err "not_found" "path does not exist"
 
 listEntries :: FilePath -> FilePath -> ListOptions -> Int -> IO [FileEntry]
 listEntries base dir ListOptions {..} depth = do
@@ -669,34 +697,37 @@ uploadIdFor raw UploadBegin {..} =
   take 32 $ sha256Bytes $ B.pack $ raw ++ "\n" ++ show beginSize ++ "\n" ++ beginSha256
 
 apiUploadBegin :: ApiConfig -> FilePath -> UploadBegin -> IO Value
-apiUploadBegin cfg raw begin@UploadBegin {..} = do
-  resolved <- safeResolve cfg raw
-  case resolved of
-    Left e -> pure $ err (errorCode e) (errorMessage e)
-    Right _
-      | beginSize < 0 -> pure $ err "invalid_size" "upload size must be non-negative"
-      | not (validSha256Hex beginSha256) -> pure $ err "invalid_sha256" "file sha256 is invalid"
-      | maybe False (<= 0) beginChunkSize -> pure $ err "invalid_chunk_size" "chunkSize must be positive"
-      | otherwise -> do
-      let uploadId = uploadIdFor raw begin
-          chunkSize = fromMaybe (1024 * 1024) beginChunkSize
-          meta = UploadMeta uploadId raw beginSize beginSha256 chunkSize
-          (dir, metaFile, dataFile) = uploadPaths cfg uploadId
-      createDirectoryIfMissing True dir
-      metaExists <- doesFileExist metaFile
-      if metaExists then do
-        existing <- readJsonFile metaFile
-        case existing of
-          Right existingMeta | existingMeta == meta -> do
-            repairUploadDataFile cfg uploadId dataFile beginSize
-            toJSON <$> buildUploadStatus cfg existingMeta
-          Right _ -> pure $ err "upload_conflict" "existing upload metadata differs"
-          Left msg -> pure $ err "invalid_upload_state" msg
-      else do
-        ensureUploadDataFile dataFile beginSize
-        writeJsonFile metaFile meta
-        writeJsonFile (chunksPath cfg uploadId) ([] :: [ChunkRecord])
-        toJSON <$> buildUploadStatus cfg meta
+apiUploadBegin cfg _ begin@UploadBegin {..} =
+  case beginPath of
+    Nothing -> pure $ err "invalid_workload" "missing path"
+    Just targetPath -> do
+      resolved <- safeResolve cfg targetPath
+      case resolved of
+        Left e -> pure $ err (errorCode e) (errorMessage e)
+        Right _
+          | beginSize < 0 -> pure $ err "invalid_size" "upload size must be non-negative"
+          | not (validSha256Hex beginSha256) -> pure $ err "invalid_sha256" "file sha256 is invalid"
+          | maybe False (<= 0) beginChunkSize -> pure $ err "invalid_chunk_size" "chunkSize must be positive"
+          | otherwise -> do
+          let uploadId = uploadIdFor targetPath begin
+              chunkSize = fromMaybe (1024 * 1024) beginChunkSize
+              meta = UploadMeta uploadId targetPath beginSize beginSha256 chunkSize
+              (dir, metaFile, dataFile) = uploadPaths cfg uploadId
+          createDirectoryIfMissing True dir
+          metaExists <- doesFileExist metaFile
+          if metaExists then do
+            existing <- readJsonFile metaFile
+            case existing of
+              Right existingMeta | existingMeta == meta -> do
+                repairUploadDataFile cfg uploadId dataFile beginSize
+                toJSON <$> buildUploadStatus cfg existingMeta
+              Right _ -> pure $ err "upload_conflict" "existing upload metadata differs"
+              Left msg -> pure $ err "invalid_upload_state" msg
+          else do
+            ensureUploadDataFile dataFile beginSize
+            writeJsonFile metaFile meta
+            writeJsonFile (chunksPath cfg uploadId) ([] :: [ChunkRecord])
+            toJSON <$> buildUploadStatus cfg meta
 
 parseUploadChunkName :: FilePath -> Either ApiError (String, Integer, String)
 parseUploadChunkName raw =
@@ -896,100 +927,101 @@ readJsonFile path = eitherDecodeStrict' <$> BS.readFile path
 writeJsonFile :: ToJSON a => FilePath -> a -> IO ()
 writeJsonFile path payload = BS.writeFile path $ LB.toStrict $ encode payload
 
-getFile :: (Transport tp, MonadUnliftIO m) => ApiConfig -> JobT tp m ()
-getFile cfg = do
-  raw <- name
-  resolved <- liftIO $ safeResolve cfg raw
-  case resolved of
-    Left e -> liftIO $ ioError $ userError $ errorMessage e
-    Right path -> do
-      exists <- liftIO $ doesFileExist path
-      unless exists $ liftIO $ ioError $ userError "file does not exist"
-      bs <- liftIO $ BS.readFile path
-      void $ workDone_ bs
-
-putFile :: (Transport tp, MonadUnliftIO m) => ApiConfig -> JobT tp m ()
-putFile cfg = do
-  raw <- name
-  bs <- workload
-  rsp <- liftIO $ apiPutFile cfg raw bs
-  void $ workDone_ $ jsonValue rsp
-
 getDirectory :: (Transport tp, MonadUnliftIO m) => ApiConfig -> JobT tp m ()
 getDirectory cfg = do
-  raw <- name
-  opts <- decodeOptionalWorkload defaultListOptions
-  rsp <- liftIO $ apiListDirectory cfg raw opts
+  decoded <- decodeRequiredWorkload
+  rsp <- case decoded of
+    Left e -> pure $ err "invalid_workload" e
+    Right opts -> case listPath opts of
+      Nothing -> pure $ err "invalid_workload" "missing path"
+      Just raw -> liftIO $ apiListDirectory cfg raw opts
   void $ workDone_ $ jsonValue rsp
 
 statPath :: (Transport tp, MonadUnliftIO m) => ApiConfig -> JobT tp m ()
 statPath cfg = do
-  raw <- name
-  rsp <- liftIO $ apiStatPath cfg raw
+  decoded <- decodeRequiredWorkload
+  rsp <- case decoded of
+    Left e -> pure $ err "invalid_workload" e
+    Right PathOptions {optionPath = Nothing} -> pure $ err "invalid_workload" "missing path"
+    Right PathOptions {optionPath = Just raw} -> liftIO $ apiStatPath cfg raw
   void $ workDone_ $ jsonValue rsp
 
 downloadInfo :: (Transport tp, MonadUnliftIO m) => ApiConfig -> JobT tp m ()
 downloadInfo cfg = do
-  raw <- name
-  rsp <- liftIO $ apiDownloadInfo cfg raw
+  decoded <- decodeRequiredWorkload
+  rsp <- case decoded of
+    Left e -> pure $ err "invalid_workload" e
+    Right PathOptions {optionPath = Nothing} -> pure $ err "invalid_workload" "missing path"
+    Right PathOptions {optionPath = Just raw} -> liftIO $ apiDownloadInfo cfg raw
   void $ workDone_ $ jsonValue rsp
 
 downloadChunk :: (Transport tp, MonadUnliftIO m) => ApiConfig -> JobT tp m ()
 downloadChunk cfg = do
-  raw <- name
   decoded <- decodeRequiredWorkload
   rsp <- case decoded of
     Left e -> pure $ Left $ ApiError "invalid_workload" e
-    Right rangeOpts -> liftIO $ apiDownloadChunk cfg raw rangeOpts
+    Right rangeOpts -> case downloadPath rangeOpts of
+      Nothing -> pure $ Left $ ApiError "invalid_workload" "missing path"
+      Just raw -> liftIO $ apiDownloadChunk cfg raw rangeOpts
   case rsp of
     Left e -> liftIO $ ioError $ userError $ errorCode e ++ ": " ++ errorMessage e
     Right bs -> void $ workDone_ bs
 
 sha256Sum :: (Transport tp, MonadUnliftIO m) => ApiConfig -> JobT tp m ()
 sha256Sum cfg = do
-  raw <- name
-  opts <- decodeOptionalWorkload defaultListOptions
-  rsp <- liftIO $ apiSha256Sum cfg raw opts
+  decoded <- decodeRequiredWorkload
+  rsp <- case decoded of
+    Left e -> pure $ err "invalid_workload" e
+    Right opts -> case listPath opts of
+      Nothing -> pure $ err "invalid_workload" "missing path"
+      Just raw -> liftIO $ apiSha256Sum cfg raw opts
   void $ workDone_ $ jsonValue rsp
 
 makeDirectory :: (Transport tp, MonadUnliftIO m) => ApiConfig -> JobT tp m ()
 makeDirectory cfg = do
-  raw <- name
-  rsp <- liftIO $ apiMakeDirectory cfg raw
+  decoded <- decodeRequiredWorkload
+  rsp <- case decoded of
+    Left e -> pure $ err "invalid_workload" e
+    Right PathOptions {optionPath = Nothing} -> pure $ err "invalid_workload" "missing path"
+    Right PathOptions {optionPath = Just raw} -> liftIO $ apiMakeDirectory cfg raw
   void $ workDone_ $ jsonValue rsp
 
 deletePath :: (Transport tp, MonadUnliftIO m) => ApiConfig -> JobT tp m ()
 deletePath cfg = do
-  raw <- name
-  opts <- decodeOptionalWorkload $ DeleteOptions False
-  rsp <- liftIO $ apiDeletePath cfg raw opts
+  decoded <- decodeRequiredWorkload
+  rsp <- case decoded of
+    Left e -> pure $ err "invalid_workload" e
+    Right opts -> case deleteOptionPath opts of
+      Nothing -> pure $ err "invalid_workload" "missing path"
+      Just raw -> liftIO $ apiDeletePath cfg raw opts
   void $ workDone_ $ jsonValue rsp
 
 movePath :: (Transport tp, MonadUnliftIO m) => ApiConfig -> JobT tp m ()
 movePath cfg = do
-  raw <- name
   opts <- decodeRequiredWorkload
   rsp <- case opts of
     Left e -> pure $ err "invalid_workload" e
-    Right moveOpts -> liftIO $ apiMovePath cfg raw moveOpts
+    Right moveOpts -> case moveFrom moveOpts of
+      Nothing -> pure $ err "invalid_workload" "missing from"
+      Just raw -> liftIO $ apiMovePath cfg raw moveOpts
   void $ workDone_ $ jsonValue rsp
 
 copyPath :: (Transport tp, MonadUnliftIO m) => ApiConfig -> JobT tp m ()
 copyPath cfg = do
-  raw <- name
   opts <- decodeRequiredWorkload
   rsp <- case opts of
     Left e -> pure $ err "invalid_workload" e
-    Right copyOpts -> liftIO $ apiCopyPath cfg raw copyOpts
+    Right copyOpts -> case copyFrom copyOpts of
+      Nothing -> pure $ err "invalid_workload" "missing from"
+      Just raw -> liftIO $ apiCopyPath cfg raw copyOpts
   void $ workDone_ $ jsonValue rsp
 
 uploadBegin :: (Transport tp, MonadUnliftIO m) => ApiConfig -> JobT tp m ()
 uploadBegin cfg = do
-  raw <- name
   decoded <- decodeRequiredWorkload
   rsp <- case decoded of
     Left e -> pure $ err "invalid_workload" e
-    Right begin -> liftIO $ apiUploadBegin cfg raw begin
+    Right begin -> liftIO $ apiUploadBegin cfg "" begin
   void $ workDone_ $ jsonValue rsp
 
 uploadChunk :: (Transport tp, MonadUnliftIO m) => ApiConfig -> JobT tp m ()

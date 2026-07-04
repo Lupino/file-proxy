@@ -37,22 +37,37 @@ main = hspec do
       withTestConfig False \cfg -> do
         _ <- apiPutFile cfg "a.txt" "a"
         _ <- apiPutFile cfg "dir/b.txt" "b"
-        rsp <- apiSha256Sum cfg "." (ListOptions True Nothing)
+        rsp <- apiSha256Sum cfg "." (ListOptions True Nothing Nothing)
         assertOk rsp
         case lookupField "files" rsp of
           Just (Array files) -> length files `shouldBe` 2
           other -> expectationFailure $ "expected files array, got " ++ show other
 
+    it "returns file metadata when listing a file path" do
+      withTestConfig False \cfg -> do
+        _ <- apiPutFile cfg "a.txt" "abc"
+        rsp <- apiListDirectory cfg "a.txt" (ListOptions False Nothing Nothing)
+        assertOk rsp
+        case lookupField "entry" rsp of
+          Just entry -> do
+            lookupField "type" entry `shouldBe` Just (String "file")
+            lookupField "size" entry `shouldBe` Just (Number 3)
+            lookupField "sha256" entry `shouldBe` Just (String $ Text.pack $ sha256Bytes "abc")
+          other -> expectationFailure $ "expected file entry, got " ++ show other
+        case lookupField "entries" rsp of
+          Just (Array entries) -> length entries `shouldBe` 1
+          other -> expectationFailure $ "expected one entry, got " ++ show other
+
     it "does not delete unless explicitly enabled" do
       withTestConfig False \cfg -> do
         _ <- apiPutFile cfg "keep.txt" "x"
-        rsp <- apiDeletePath cfg "keep.txt" (DeleteOptions False)
+        rsp <- apiDeletePath cfg "keep.txt" (DeleteOptions False Nothing)
         assertError "delete_disabled" rsp
         doesFileExist (cfgRoot cfg </> "keep.txt") `shouldReturn` True
 
       withTestConfig True \cfg -> do
         _ <- apiPutFile cfg "remove.txt" "x"
-        rsp <- apiDeletePath cfg "remove.txt" (DeleteOptions False)
+        rsp <- apiDeletePath cfg "remove.txt" (DeleteOptions False Nothing)
         assertOk rsp
         doesFileExist (cfgRoot cfg </> "remove.txt") `shouldReturn` False
 
@@ -68,37 +83,37 @@ main = hspec do
     it "reads middle and final partial chunks" do
       withTestConfig False \cfg -> do
         _ <- apiPutFile cfg "big/file.bin" "abcdef"
-        middle <- apiDownloadChunk cfg "big/file.bin" (DownloadRange 2 3)
+        middle <- apiDownloadChunk cfg "big/file.bin" (DownloadRange 2 3 Nothing)
         middle `shouldBe` Right "cde"
 
-        final <- apiDownloadChunk cfg "big/file.bin" (DownloadRange 4 8)
+        final <- apiDownloadChunk cfg "big/file.bin" (DownloadRange 4 8 Nothing)
         final `shouldBe` Right "ef"
 
     it "rejects invalid download paths and ranges" do
       withTestConfig False \cfg -> do
-        missing <- apiDownloadChunk cfg "missing.bin" (DownloadRange 0 3)
+        missing <- apiDownloadChunk cfg "missing.bin" (DownloadRange 0 3 Nothing)
         assertLeftError "not_found" missing
 
-        invalidPath <- apiDownloadChunk cfg "../secret.bin" (DownloadRange 0 3)
+        invalidPath <- apiDownloadChunk cfg "../secret.bin" (DownloadRange 0 3 Nothing)
         assertLeftError "invalid_path" invalidPath
 
         _ <- apiPutFile cfg "file.bin" "abc"
-        negative <- apiDownloadChunk cfg "file.bin" (DownloadRange (-1) 1)
+        negative <- apiDownloadChunk cfg "file.bin" (DownloadRange (-1) 1 Nothing)
         assertLeftError "invalid_range" negative
 
-        zero <- apiDownloadChunk cfg "file.bin" (DownloadRange 0 0)
+        zero <- apiDownloadChunk cfg "file.bin" (DownloadRange 0 0 Nothing)
         assertLeftError "invalid_range" zero
 
-        pastEnd <- apiDownloadChunk cfg "file.bin" (DownloadRange 3 1)
+        pastEnd <- apiDownloadChunk cfg "file.bin" (DownloadRange 3 1 Nothing)
         assertLeftError "range_out_of_bounds" pastEnd
 
     it "reconstructs a file from multiple chunks and verifies sha256" do
       withTestConfig False \cfg -> do
         let body = "abcdefghij"
         _ <- apiPutFile cfg "remote.bin" body
-        first <- apiDownloadChunk cfg "remote.bin" (DownloadRange 0 4)
-        second <- apiDownloadChunk cfg "remote.bin" (DownloadRange 4 4)
-        third <- apiDownloadChunk cfg "remote.bin" (DownloadRange 8 4)
+        first <- apiDownloadChunk cfg "remote.bin" (DownloadRange 0 4 Nothing)
+        second <- apiDownloadChunk cfg "remote.bin" (DownloadRange 4 4 Nothing)
+        third <- apiDownloadChunk cfg "remote.bin" (DownloadRange 8 4 Nothing)
 
         let reconstructed = mconcat [unwrapRight first, unwrapRight second, unwrapRight third]
         reconstructed `shouldBe` body
@@ -171,7 +186,7 @@ main = hspec do
   describe "resumable upload" do
     it "rejects invalid upload metadata" do
       withTestConfig False \cfg -> do
-        rsp <- apiUploadBegin cfg "bad.bin" (UploadBegin 10 "not-a-sha" (Just 3))
+        rsp <- apiUploadBegin cfg "bad.bin" (UploadBegin 10 "not-a-sha" (Just 3) (Just "bad.bin"))
         assertError "invalid_sha256" rsp
 
     it "resumes chunks and publishes only after final sha256 verification" do
@@ -180,7 +195,7 @@ main = hspec do
             body = "abcdef"
             first = "abc"
             second = "def"
-            begin = UploadBegin 6 (sha256Bytes body) (Just 3)
+            begin = UploadBegin 6 (sha256Bytes body) (Just 3) (Just target)
             uploadId = uploadIdFor target begin
             dataFile = uploadDataPath cfg uploadId
 
@@ -211,7 +226,7 @@ main = hspec do
         let target = "repair.bin"
             body = "abcdef"
             first = "abc"
-            begin = UploadBegin 6 (sha256Bytes body) (Just 3)
+            begin = UploadBegin 6 (sha256Bytes body) (Just 3) (Just target)
             uploadId = uploadIdFor target begin
             dataFile = uploadDataPath cfg uploadId
 
@@ -231,13 +246,30 @@ main = hspec do
       withTestConfig False \cfg -> do
         let target = "empty.bin"
             body = "abc"
-            begin = UploadBegin 3 (sha256Bytes body) (Just 3)
+            begin = UploadBegin 3 (sha256Bytes body) (Just 3) (Just target)
             uploadId = uploadIdFor target begin
 
         beginRsp <- apiUploadBegin cfg target begin
         assertOk beginRsp
         chunkRsp <- apiUploadChunk cfg (uploadId </> "0" </> sha256Bytes "") ""
         assertError "invalid_chunk_size" chunkRsp
+
+    it "stores the upload target path in workload instead of the begin job name" do
+      withTestConfig False \cfg -> do
+        let target = "target/from-workload.bin"
+            body = "abc"
+            begin = UploadBegin 3 (sha256Bytes body) (Just 3) (Just target)
+            uploadId = uploadIdFor target begin
+
+        beginRsp <- apiUploadBegin cfg "begin-job-unique-id" begin
+        assertOk beginRsp
+        lookupField "path" beginRsp `shouldBe` Just (String $ Text.pack target)
+
+        chunkRsp <- apiUploadChunk cfg (uploadId </> "0" </> sha256Bytes body) body
+        assertOk chunkRsp
+        finishRsp <- apiUploadFinish cfg uploadId
+        assertOk finishRsp
+        BS.readFile (cfgRoot cfg </> target) `shouldReturn` body
 
     it "rejects upload ids with path traversal" do
       withTestConfig False \cfg -> do
@@ -260,8 +292,20 @@ main = hspec do
       downloadPartPath "remote.bin" `shouldBe` "remote.bin.part"
 
     it "prefixes worker function names with raw concatenation" do
-      prefixFunctionName "" "get-file" `shouldBe` "get-file"
-      prefixFunctionName "files-" "get-file" `shouldBe` "files-get-file"
+      prefixFunctionName "" "download-info" `shouldBe` "download-info"
+      prefixFunctionName "files-" "download-info" `shouldBe` "files-download-info"
+
+    it "reports expired JSON jobs without exposing parser internals" do
+      formatInvalidJsonResponse "Unexpected \"expired\", expecting JSON value" "expired"
+        `shouldBe` "file-proxy worker job expired before returning JSON; retry with a larger --timeout or check worker logs"
+
+    it "keeps malformed JSON diagnostics with the response body" do
+      formatInvalidJsonResponse "Unexpected token" "not-json"
+        `shouldBe` "invalid JSON response from file-proxy worker (8 bytes): Unexpected token"
+
+    it "does not echo mixed JSON fragments in diagnostics" do
+      formatInvalidJsonResponse "Unexpected \"expired\", expecting JSON value" "expired{\"ok\":true}"
+        `shouldBe` "invalid JSON response from file-proxy worker (18 bytes): Unexpected \"expired\", expecting JSON value"
 
 isLeft :: Either a b -> Bool
 isLeft (Left _) = True

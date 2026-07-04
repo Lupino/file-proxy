@@ -44,7 +44,7 @@ If `--rsa-private-path` is empty, the worker uses a plain socket transport. If i
 
 `--client-name` and `--client-token` must be provided together.
 
-When `--prefix` or `PERIODIC_FUNC_PREFIX` is set, start the worker and call the client with the same value. The prefix is concatenated exactly as provided, so `--prefix files-` registers and calls functions such as `files-get-file`.
+When `--prefix` or `PERIODIC_FUNC_PREFIX` is set, start the worker and call the client with the same value. The prefix is concatenated exactly as provided, so `--prefix files-` registers and calls functions such as `files-download-info`.
 
 ## Response Format
 
@@ -60,7 +60,7 @@ or:
 {"ok":false,"error":{"code":"not_found","message":"path does not exist"}}
 ```
 
-`get-file` returns raw file bytes on success. Missing or invalid files fail the job instead of returning an error string as file content.
+Ranged download chunks return raw file bytes. Metadata and file-operation functions return JSON.
 
 ## File Functions
 
