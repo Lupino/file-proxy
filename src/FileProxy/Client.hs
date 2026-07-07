@@ -207,7 +207,7 @@ removeParser = CmdRemove <$> remoteArg <*> recursiveOpt <*> timeoutOpt
 uploadParser = CmdUpload <$> localArg <*> remoteArg <*> chunkSizeOpt <*> timeoutOpt
 downloadParser = CmdDownload <$> remoteArg <*> localArg <*> chunkSizeOpt <*> timeoutOpt
 uploadDirParser = CmdUploadDir <$> localArg <*> remoteArg <*> excludeHiddenOpt <*> chunkSizeOpt <*> timeoutOpt
-downloadDirParser = CmdDownloadDir <$> remoteArg <*> localArg <*> excludeHiddenOpt <*> chunkSizeOpt <*> timeoutOpt
+downloadDirParser = CmdDownloadDir <$> remoteArg <*> localArgOrCurrent <*> excludeHiddenOpt <*> chunkSizeOpt <*> timeoutOpt
 
 remoteArg :: Parser FilePath
 remoteArg = strArgument (metavar "REMOTE")
@@ -217,6 +217,9 @@ remoteArgTo = strArgument (metavar "TO")
 
 localArg :: Parser FilePath
 localArg = strArgument (metavar "LOCAL")
+
+localArgOrCurrent :: Parser FilePath
+localArgOrCurrent = strArgument (metavar "LOCAL" <> value ".")
 
 recursiveOpt :: Parser Bool
 recursiveOpt = switch (long "recursive" <> short 'r' <> help "Enable recursive operation")
