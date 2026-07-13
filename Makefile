@@ -26,7 +26,7 @@ endif
 endif
 endif
 
-OUT = file-proxy file-proxy-client
+OUT = file-proxy file-proxy-client file-proxy-web
 
 BUNDLE_BIN = dist/bundle/bin
 BUNDLE_LIB = dist/bundle/lib/file-proxy

@@ -1,0 +1,23 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body { @apply m-0 bg-slate-100 text-slate-900 antialiased; font-family: ui-sans-serif, system-ui, sans-serif; }
+
+button, label { @apply transition-colors; }
+.button-primary { @apply inline-flex cursor-pointer items-center gap-2 rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm shadow-blue-200 hover:bg-blue-700; }
+.button-secondary { @apply cursor-pointer items-center gap-2 rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 hover:border-blue-400 hover:bg-blue-50 hover:text-blue-700; }
+.button-quiet { @apply inline-flex items-center gap-1.5 rounded-lg px-2.5 py-2 text-sm font-medium text-slate-500 hover:bg-slate-100 hover:text-slate-800; }
+.breadcrumb-muted { @apply truncate text-slate-400 hover:text-blue-600; }
+.breadcrumb-current { @apply max-w-[18rem] truncate text-slate-800; }
+.file-table-header { @apply hidden grid-cols-[minmax(0,1fr)_10rem_9rem_15rem] gap-4 border-b border-slate-100 px-3 py-3 text-xs font-semibold uppercase tracking-wide text-slate-400 md:grid; }
+.table-sort { @apply rounded px-1 py-1 font-semibold uppercase tracking-wide text-slate-400 hover:bg-slate-50 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-50; }
+.file-row { @apply grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-xl border-b border-slate-100 px-3 py-4 md:grid-cols-[minmax(0,1fr)_10rem_9rem_15rem] md:gap-4; }
+.file-row:hover { @apply bg-slate-50; }
+.action-button { @apply whitespace-nowrap rounded-lg px-2 py-1.5 text-xs font-medium text-blue-600 opacity-100 hover:bg-blue-50 hover:text-blue-700 disabled:cursor-not-allowed disabled:opacity-60 md:opacity-0 md:group-hover:opacity-100; }
+.action-button.danger { @apply text-red-500 hover:bg-red-50 hover:text-red-700; }
+.file-icon { @apply grid h-10 w-10 shrink-0 place-items-center rounded-xl text-lg; }
+.file-icon.folder { @apply bg-amber-50 text-amber-500; }
+.file-icon.image { @apply bg-violet-50 text-violet-500; }
+.file-icon.archive { @apply bg-orange-50 text-orange-500; }
+.file-icon.document { @apply bg-slate-100 text-slate-500; }

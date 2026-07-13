@@ -27,6 +27,7 @@ library:
   exposed-modules:
   - FileProxy.Client
   - FileProxy.Version
+  - FileProxy.Web
   - FileProxy.Worker
   dependencies:
   - aeson
@@ -39,10 +40,14 @@ library:
   - unliftio
   - optparse-applicative
   - directory
+  - file-embed
+  - http-types
   - time
   - metro
   - metro-socket
   - metro-transport-crypto
+  - scotty
+  - warp
 
 executables:
   file-proxy:
@@ -56,6 +61,15 @@ executables:
     - file-proxy
   file-proxy-client:
     main:                file-proxy-client.hs
+    source-dirs:         app
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    dependencies:
+    - file-proxy
+  file-proxy-web:
+    main:                file-proxy-web.hs
     source-dirs:         app
     ghc-options:
     - -threaded

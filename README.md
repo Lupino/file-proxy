@@ -111,3 +111,29 @@ file-proxy-client download remote/big.bin ./big.bin --chunk-size 1048576 --timeo
 The worker still serves `download-info` and `download-chunk` internally. `download-chunk` returns raw file bytes on success. If a requested range extends past EOF, it returns the remaining bytes. Offsets past EOF are rejected with `range_out_of_bounds`.
 
 Download progress is rendered to stderr as a single-line progress bar. The client prevents concurrent downloads to the same local path with a `<local>.part.lock` lock file.
+
+## Web Client
+
+Build the React client and start the HTTP gateway after starting a
+`file-proxy` worker:
+
+```bash
+cd web
+npm install
+npm run build
+cd ..
+stack build --fast
+stack exec file-proxy-web
+```
+
+The `file-proxy-web` binary embeds the Vite `web/dist` output at compile time,
+so the runtime does not need the `web/` directory. The gateway serves the
+built client at `http://127.0.0.1:8080/` and proxies HTTP requests to the
+Periodic worker. During development, run `npm run dev` in `web/`; Vite proxies
+`/api` to port 8080.
+
+The gateway accepts command-line options and environment defaults. Supported
+environment variables are `FILE_PROXY_WEB_HOST`, `FILE_PROXY_WEB_PORT`,
+`PERIODIC_PORT`, `PERIODIC_FUNC_PREFIX`, `PERIODIC_RSA_PRIVATE_PATH`,
+`PERIODIC_RSA_PUBLIC_PATH`, `PERIODIC_RSA_MODE`, `PERIODIC_CLIENT_NAME`,
+and `PERIODIC_CLIENT_TOKEN`.
