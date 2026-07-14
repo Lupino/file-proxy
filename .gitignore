@@ -1,7 +1,8 @@
 .stack-work/
-web/node_modules/
-web/*.tsbuildinfo
-web/vite.config.js
-web/vite.config.d.ts
+web-assets/node_modules/
+web-assets/*.tsbuildinfo
+web-assets/dist
+web-assets/vite.config.js
+web-assets/vite.config.d.ts
 *~
 stack.yaml.lock

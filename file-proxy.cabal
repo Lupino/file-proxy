@@ -105,6 +105,7 @@ test-suite file-proxy-test
     , bytestring
     , directory
     , file-proxy
+    , file-proxy-web-assets
     , filepath
     , hspec
     , temporary

@@ -92,6 +92,7 @@ tests:
     - bytestring
     - directory
     - filepath
+    - file-proxy-web-assets
     - hspec
     - temporary
     - text

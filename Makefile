@@ -27,6 +27,8 @@ endif
 endif
 
 OUT = file-proxy file-proxy-client file-proxy-web
+WEB_ASSETS_GENERATOR = web-assets/generate-web-assets.js
+WEB_ASSETS_MODULE = web-assets/src/FileProxy/WebAssets.hs
 
 BUNDLE_BIN = dist/bundle/bin
 BUNDLE_LIB = dist/bundle/lib/file-proxy
@@ -64,6 +66,19 @@ package: $(OUT)
 		cd dist/$(PLATFORM) && tar cjvf ../file-proxy-$(SYSTEM)-$(PLATFORM).tar.bz2 *; \
 	else \
 		cd dist/$(PLATFORM) && tar cjvf ../file-proxy-$(SYSTEM)-$(PLATFORM).tar.bz2 file-proxy*; \
+	fi
+
+web-assets-refresh:
+	cd web-assets && npm run build
+
+check-web-assets:
+	@tmp=$$(mktemp); \
+	trap 'rm -f "$$tmp"' EXIT; \
+	node $(WEB_ASSETS_GENERATOR) --output "$$tmp"; \
+	if ! cmp -s "$$tmp" "$(WEB_ASSETS_MODULE)"; then \
+		diff -u "$(WEB_ASSETS_MODULE)" "$$tmp"; \
+		echo "error: embedded web assets are stale; run make web-assets-refresh" >&2; \
+		exit 1; \
 	fi
 
 macos-build:
@@ -131,5 +146,7 @@ help:
 	@echo make PLATFORM=mingwW64
 	@echo make macos-bundle
 	@echo make macos-static
+	@echo make web-assets-refresh
+	@echo make check-web-assets
 	@echo make clean
 	@echo make update-sha256
