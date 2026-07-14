@@ -20,11 +20,8 @@ library
   build-depends:
       aeson
     , base >=4.7 && <5
-    , base16-bytestring
     , base64-bytestring
     , bytestring
-    , cryptohash-sha256
-    , directory
     , file-proxy
     , filepath
     , http-types
@@ -36,7 +33,6 @@ library
     , periodic-common
     , scotty
     , time
-    , unliftio
     , warp
   default-language: Haskell2010
 

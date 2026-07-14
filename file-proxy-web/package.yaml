@@ -15,9 +15,6 @@ library:
   - bytestring
   - base64-bytestring
   - aeson
-  - base16-bytestring
-  - cryptohash-sha256
-  - directory
   - filepath
   - http-types
   - metro
@@ -28,7 +25,6 @@ library:
   - periodic-common
   - scotty
   - time
-  - unliftio
   - warp
 
 executables:
