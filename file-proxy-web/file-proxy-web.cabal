@@ -12,6 +12,7 @@ build-type:     Simple
 library
   exposed-modules:
       FileProxy.Web
+      FileProxy.Web.Standalone
       FileProxy.WebAssets
   other-modules:
       Paths_file_proxy_web
@@ -33,11 +34,24 @@ library
     , periodic-common
     , scotty
     , time
+    , wai
     , warp
   default-language: Haskell2010
 
 executable file-proxy-web
   main-is: file-proxy-web.hs
+  other-modules:
+      Paths_file_proxy_web
+  hs-source-dirs:
+      app
+  ghc-options: -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+      base >=4.7 && <5
+    , file-proxy-web
+  default-language: Haskell2010
+
+executable file-proxy-web-standalone
+  main-is: file-proxy-web-standalone.hs
   other-modules:
       Paths_file_proxy_web
   hs-source-dirs:
@@ -56,10 +70,17 @@ test-suite file-proxy-web-test
   hs-source-dirs:
       test
   build-depends:
-      base >=4.7 && <5
+      aeson
+    , base >=4.7 && <5
     , bytestring
     , directory
+    , file-proxy
     , file-proxy-web
     , filepath
     , hspec
+    , http-types
+    , temporary
+    , text
+    , wai
+    , wai-extra
   default-language: Haskell2010

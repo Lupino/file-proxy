@@ -26,7 +26,7 @@ endif
 endif
 endif
 
-OUT = file-proxy file-proxy-client file-proxy-web
+OUT = file-proxy file-proxy-client file-proxy-web file-proxy-web-standalone
 .PHONY: $(OUT)
 WEB_ASSETS_GENERATOR = file-proxy-web/generate-web-assets.js
 WEB_ASSETS_MODULE = file-proxy-web/src/FileProxy/WebAssets.hs
@@ -61,7 +61,7 @@ dist/$(PLATFORM)/%: dist/$(PLATFORM)
 file-proxy file-proxy-client:
 	$(MAKE) PKG=file-proxy dist/$(PLATFORM)/$@$(EXT)
 
-file-proxy-web:
+file-proxy-web file-proxy-web-standalone:
 	$(MAKE) PKG=file-proxy-web dist/$(PLATFORM)/$@$(EXT)
 
 package: $(OUT)

@@ -137,3 +137,19 @@ environment variables are `FILE_PROXY_WEB_HOST`, `FILE_PROXY_WEB_PORT`,
 `PERIODIC_PORT`, `PERIODIC_FUNC_PREFIX`, `PERIODIC_RSA_PRIVATE_PATH`,
 `PERIODIC_RSA_PUBLIC_PATH`, `PERIODIC_RSA_MODE`, `PERIODIC_CLIENT_NAME`,
 and `PERIODIC_CLIENT_TOKEN`.
+
+### Standalone Web Server
+
+`file-proxy-web-standalone` serves the same embedded web client but calls the
+file APIs directly. It does not require a Periodic server, socket, RSA keys,
+or Periodic client credentials:
+
+```bash
+stack exec file-proxy-web-standalone -- --root /path/to/root
+```
+
+It binds to `127.0.0.1:8080` by default. Configure `--host`, `--port`, and
+`--root` (or `FILE_PROXY_WEB_HOST`, `FILE_PROXY_WEB_PORT`, and
+`FILE_PROXY_ROOT`) as needed. Deletion remains disabled unless
+`--allow-delete` or `FILE_PROXY_ALLOW_DELETE=true` is supplied. Bind beyond
+loopback only behind an appropriate network access control or reverse proxy.

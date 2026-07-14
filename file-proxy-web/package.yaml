@@ -9,6 +9,7 @@ library:
   source-dirs: src
   exposed-modules:
   - FileProxy.Web
+  - FileProxy.Web.Standalone
   - FileProxy.WebAssets
   dependencies:
   - file-proxy
@@ -26,10 +27,20 @@ library:
   - scotty
   - time
   - warp
+  - wai
 
 executables:
   file-proxy-web:
     main:                file-proxy-web.hs
+    source-dirs:         app
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    dependencies:
+    - file-proxy-web
+  file-proxy-web-standalone:
+    main:                file-proxy-web-standalone.hs
     source-dirs:         app
     ghc-options:
     - -threaded
@@ -44,7 +55,14 @@ tests:
     source-dirs:         test
     dependencies:
     - file-proxy-web
+    - file-proxy
+    - aeson
     - bytestring
     - directory
     - filepath
     - hspec
+    - http-types
+    - temporary
+    - text
+    - wai
+    - wai-extra

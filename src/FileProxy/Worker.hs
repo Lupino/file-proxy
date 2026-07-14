@@ -6,6 +6,8 @@ module FileProxy.Worker
   ( ApiConfig (..)
   , ApiError (..)
   , DeleteOptions (..)
+  , MoveOptions (..)
+  , CopyOptions (..)
   , FileEntry (..)
   , ListOptions (..)
   , DownloadRange (..)
@@ -18,12 +20,16 @@ module FileProxy.Worker
   , apiDownloadChunk
   , apiDownloadInfo
   , apiListDirectory
+  , apiMakeDirectory
+  , apiMovePath
+  , apiCopyPath
   , apiPutFile
   , apiSha256Sum
   , apiStatPath
   , apiUploadBegin
   , apiUploadChunk
   , apiUploadFinish
+  , apiUploadAbort
   , apiUploadStatus
   , parseUploadChunkName
   , prefixFunctionName
