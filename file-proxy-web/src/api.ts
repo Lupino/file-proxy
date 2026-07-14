@@ -53,15 +53,21 @@ export async function downloadFile(path: string, name: string) {
   URL.revokeObjectURL(objectUrl)
 }
 
-export async function fetchFileBlob(path: string) {
+export async function fetchFileBlob(path: string, onProgress?: (value: number) => void) {
   const info = await request<{ size: number }>(downloadUrl(path))
   const chunks: BlobPart[] = []
   const chunkSize = 1024 * 1024
+  let downloaded = 0
+  onProgress?.(0)
   for (let offset = 0; offset < info.size; offset += chunkSize) {
     const response = await fetch(`/api/download/chunk?path=${encodeURIComponent(path)}&offset=${offset}&size=${chunkSize}`)
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
-    chunks.push(await response.blob())
+    const chunk = await response.blob()
+    chunks.push(chunk)
+    downloaded += chunk.size
+    onProgress?.(Math.min(downloaded / info.size, 1))
   }
+  onProgress?.(1)
   return new Blob(chunks)
 }
 

@@ -7,10 +7,12 @@ import type { UploadTask } from './store'
 import './index.css'
 
 type SortKey = 'name' | 'modified' | 'size'
+type Preview = { name: string; progress: number; url?: string; ready: boolean }
 
 function App() {
   const { path, entries, loading, busy, error, uploadTasks, uploadPanelOpen, open, openUploadPanel, upload, remove, moveEntry, createFolder, closeUploadPanel } = useFileStore()
-  const [preview, setPreview] = React.useState<{ url: string; name: string } | null>(null)
+  const [preview, setPreview] = React.useState<Preview | null>(null)
+  const previewRequestId = React.useRef(0)
   const [activeAction, setActiveAction] = React.useState<string | null>(null)
   const [uploadNotice, setUploadNotice] = React.useState<string | null>(null)
   const [movingEntry, setMovingEntry] = React.useState<Entry | null>(null)
@@ -46,13 +48,25 @@ function App() {
   const sortLabel = sortKey === 'name' ? 'Name' : sortKey === 'modified' ? 'Modified' : 'Size'
 
   const showPreview = async (entry: Entry) => {
+    const requestId = ++previewRequestId.current
     setActiveAction(`preview:${entry.path}`)
+    setPreview({ name: entry.name, progress: 0, ready: false })
     try {
-      const blob = await fetchFileBlob(entry.path)
-      setPreview(current => { if (current) URL.revokeObjectURL(current.url); return { url: URL.createObjectURL(blob), name: entry.name } })
+      const blob = await fetchFileBlob(entry.path, progress => {
+        if (previewRequestId.current === requestId) setPreview(current => current && { ...current, progress })
+      })
+      const url = URL.createObjectURL(blob)
+      await loadPreviewImage(url)
+      if (previewRequestId.current !== requestId) URL.revokeObjectURL(url)
+      else setPreview({ name: entry.name, progress: 1, url, ready: true })
     } catch (previewError) {
-      useFileStore.setState({ error: previewError instanceof Error ? previewError.message : 'could not preview image' })
-    } finally { setActiveAction(null) }
+      if (previewRequestId.current === requestId) {
+        setPreview(null)
+        useFileStore.setState({ error: previewError instanceof Error ? previewError.message : 'could not preview image' })
+      }
+    } finally {
+      if (previewRequestId.current === requestId) setActiveAction(null)
+    }
   }
   const download = async (entry: Entry) => {
     setActiveAction(`download:${entry.path}`)
@@ -60,7 +74,11 @@ function App() {
     catch (downloadError) { useFileStore.setState({ error: downloadError instanceof Error ? downloadError.message : 'download failed' }) }
     finally { setActiveAction(null) }
   }
-  const closePreview = () => { if (preview) URL.revokeObjectURL(preview.url); setPreview(null) }
+  const closePreview = () => {
+    previewRequestId.current += 1
+    if (preview?.url) URL.revokeObjectURL(preview.url)
+    setPreview(null)
+  }
   const submitMove = async (event: React.FormEvent) => {
     event.preventDefault()
     if (!movingEntry) return
@@ -100,7 +118,21 @@ function App() {
       {loading ? <div className="flex flex-col items-center gap-3 px-6 py-20 text-sm text-slate-400"><Spinner large />Loading files…</div> : entries.length ? <div className="px-3 pb-3 sm:px-5"><div className="file-table-header"><button className="table-sort text-left" disabled={busy !== null} onClick={() => changeSort('name')}>Name {sortKey === 'name' && (sortDescending ? '↓' : '↑')}</button><button className="table-sort text-left" disabled={busy !== null} onClick={() => changeSort('modified')}>Modified {sortKey === 'modified' && (sortDescending ? '↓' : '↑')}</button><button className="table-sort text-right" disabled={busy !== null} onClick={() => changeSort('size')}>Size {sortKey === 'size' && (sortDescending ? '↓' : '↑')}</button><span /></div>{sortedEntries.map(entry => <Row key={entry.path} entry={entry} open={open} remove={remove} move={entry => { setMovingEntry(entry); setMoveDirectory('') }} preview={showPreview} download={download} busy={busy !== null || activeAction !== null} activeAction={activeAction} />)}</div> : <EmptyState onUpload={() => document.querySelector<HTMLInputElement>('input[type=file]')?.click()} />}
     </section>
     <p className="mx-auto mt-4 max-w-7xl px-1 text-xs text-slate-400">Tip: click a folder name to open it. Files are uploaded with checksum verification.</p>
-  </main>{uploadNotice && <div className="fixed bottom-5 right-5 z-20 flex items-center gap-3 rounded-xl bg-slate-900 px-4 py-3 text-sm font-medium text-white shadow-xl"><span className="grid h-6 w-6 place-items-center rounded-full bg-emerald-500">✓</span>{uploadNotice}</div>}{uploadPanelOpen && <UploadModal tasks={uploadTasks} busy={busy === 'upload'} close={closeUploadPanel} />}{movingEntry && <MoveModal entry={movingEntry} directory={moveDirectory} setDirectory={setMoveDirectory} busy={busy === 'move'} close={() => setMovingEntry(null)} submit={submitMove} />}{preview && <div className="fixed inset-0 z-10 grid place-items-center bg-slate-950/75 p-4" role="dialog" aria-modal="true" aria-label={`Preview ${preview.name}`} onClick={closePreview}><div className="relative max-h-[92vh] max-w-[92vw] rounded-2xl bg-white p-2 shadow-2xl" onClick={event => event.stopPropagation()}><button className="absolute right-3 top-3 z-10 grid h-9 w-9 place-items-center rounded-full bg-slate-900/70 text-xl text-white hover:bg-slate-900" aria-label="Close preview" onClick={closePreview}>×</button><img className="max-h-[85vh] max-w-[88vw] rounded-xl object-contain" src={preview.url} alt={preview.name} /><p className="px-2 pb-1 pt-2 text-sm font-medium text-slate-700">{preview.name}</p></div></div>}</>
+  </main>{uploadNotice && <div className="fixed bottom-5 right-5 z-20 flex items-center gap-3 rounded-xl bg-slate-900 px-4 py-3 text-sm font-medium text-white shadow-xl"><span className="grid h-6 w-6 place-items-center rounded-full bg-emerald-500">✓</span>{uploadNotice}</div>}{uploadPanelOpen && <UploadModal tasks={uploadTasks} busy={busy === 'upload'} close={closeUploadPanel} />}{movingEntry && <MoveModal entry={movingEntry} directory={moveDirectory} setDirectory={setMoveDirectory} busy={busy === 'move'} close={() => setMovingEntry(null)} submit={submitMove} />}{preview && <PreviewModal preview={preview} close={closePreview} />}</>
+}
+
+function PreviewModal({ preview, close }: { preview: Preview; close: () => void }) {
+  const progress = Math.round(preview.progress * 100)
+  return <div className="fixed inset-0 z-30 grid place-items-center bg-slate-950/75 p-4" role="dialog" aria-modal="true" aria-label={`Preview ${preview.name}`} onClick={close}><div className="relative w-full max-w-3xl rounded-2xl bg-white p-5 shadow-2xl" onClick={event => event.stopPropagation()}>{preview.ready && <button className="absolute right-3 top-3 z-10 grid h-9 w-9 place-items-center rounded-full bg-slate-900/70 text-xl text-white hover:bg-slate-900" aria-label="Close preview" onClick={close}>×</button>}{preview.ready && preview.url ? <><img className="mx-auto max-h-[82vh] max-w-full rounded-xl object-contain" src={preview.url} alt={preview.name} /><p className="pt-3 text-sm font-medium text-slate-700">{preview.name}</p></> : <div className="py-8"><div className="flex items-center gap-3 text-sm font-medium text-slate-700"><Spinner large />Loading preview</div><p className="mt-2 truncate text-sm text-slate-500" title={preview.name}>{preview.name}</p><div className="mt-5 h-2 overflow-hidden rounded-full bg-slate-100"><div className="h-full rounded-full bg-blue-600 transition-all duration-200" style={{ width: `${progress}%` }} /></div><p className="mt-2 text-right text-sm tabular-nums text-slate-500">{progress}%</p></div>}</div></div>
+}
+
+function loadPreviewImage(url: string) {
+  return new Promise<void>((resolve, reject) => {
+    const image = new Image()
+    image.onload = () => resolve()
+    image.onerror = () => reject(new Error('could not decode image'))
+    image.src = url
+  })
 }
 
 function MoveModal({ entry, directory, setDirectory, busy, close, submit }: { entry: Entry; directory: string; setDirectory: (value: string) => void; busy: boolean; close: () => void; submit: (event: React.FormEvent) => void }) {
