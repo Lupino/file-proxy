@@ -9,6 +9,8 @@ copyright:           "MIT"
 extra-source-files:
 - README.md
 - ChangeLog.md
+- web/dist/index.html
+- web/dist/assets/*
 
 # Metadata used when publishing your package
 # synopsis:            Short description of your package
