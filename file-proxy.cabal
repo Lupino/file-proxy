@@ -18,9 +18,6 @@ build-type:     Simple
 extra-source-files:
     README.md
     ChangeLog.md
-    web/dist/index.html
-    web/dist/assets/index-Dw59fj0p.css
-    web/dist/assets/index-priF2xtC.js
 
 source-repository head
   type: git
@@ -33,7 +30,6 @@ library
       FileProxy.Web
       FileProxy.Worker
   other-modules:
-      FileProxy.WebAssets
       Paths_file_proxy
   hs-source-dirs:
       src
@@ -44,7 +40,7 @@ library
     , bytestring
     , cryptohash-sha256
     , directory
-    , file-embed
+    , file-proxy-web-assets
     , filepath
     , http-types
     , metro
