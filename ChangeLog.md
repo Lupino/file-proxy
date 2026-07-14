@@ -2,6 +2,24 @@
 
 ## Unreleased changes
 
+## v1.2.0.0 - 2026-07-14
+
+### Added
+
+- Add `file-proxy-web`, a browser-based gateway and React client for browsing
+  files and proxying requests to a `file-proxy` Periodic worker.
+- Add a dedicated web package with its own executable, frontend build, and
+  gateway regression tests.
+
+### Changed
+
+- Split the web gateway and its embedded frontend assets from the main
+  `file-proxy` package into the standalone `file-proxy-web` package.
+- Update build, Cabal, Stack, Nix, and release configuration for the separate
+  web package.
+- Refresh build snapshots for GHC 9.12 and remove unused web-package
+  dependencies.
+
 ## v1.1.0.0 - 2026-07-04
 
 ### Changed
