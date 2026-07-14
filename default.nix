@@ -45,6 +45,12 @@ in pkgs.haskell-nix.cabalProject {
          # Enable profiling globally for all packages if requested
          enableProfiling = enableProfiling;
 
+         # --- Windows Cross-Compilation Fix ---
+         # Resolve conflict between UCRT and MSVCRT by allowing multiple definitions
+         packages.file-proxy-web.configureFlags = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isWindows [
+           "--ghc-option=-optl-Wl,--allow-multiple-definition"
+         ];
+
          # Ensure os-string backed APIs are exposed consistently in this toolchain.
          packages.directory.flags.os-string = true;
          packages.process.flags.os-string = true;
