@@ -21,5 +21,10 @@ source-repository-package
     subdir: periodic-client
             periodic-common
 
+source-repository-package
+    type: git
+    location: https://github.com/scotty-web/scotty.git
+    tag: 4257621e15a0f35bd48ab4fad064ca7731430065
+
 allow-older: *
 allow-newer: *
