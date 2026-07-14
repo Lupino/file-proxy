@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build && node ./generate-web-assets.js",
+    "format": "prettier --write \"src/**/*.{ts,tsx,js,jsx,json,css,scss,md}\"",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -21,6 +22,7 @@
     "postcss": "^8.5.1",
     "tailwindcss": "^3.4.17",
     "typescript": "^5.7.3",
+    "prettier": "^3.6.2",
     "vite": "^6.0.11"
   }
 }
