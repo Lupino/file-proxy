@@ -27,7 +27,6 @@ library
   exposed-modules:
       FileProxy.Client
       FileProxy.Version
-      FileProxy.Web
       FileProxy.Worker
   other-modules:
       Paths_file_proxy
@@ -40,19 +39,15 @@ library
     , bytestring
     , cryptohash-sha256
     , directory
-    , file-proxy-web-assets
     , filepath
-    , http-types
     , metro
     , metro-socket
     , metro-transport-crypto
     , optparse-applicative
     , periodic-client
     , periodic-common
-    , scotty
     , time
     , unliftio
-    , warp
   default-language: Haskell2010
 
 executable file-proxy
@@ -79,18 +74,6 @@ executable file-proxy-client
     , file-proxy
   default-language: Haskell2010
 
-executable file-proxy-web
-  main-is: file-proxy-web.hs
-  other-modules:
-      Paths_file_proxy
-  hs-source-dirs:
-      app
-  ghc-options: -threaded -rtsopts -with-rtsopts=-N
-  build-depends:
-      base >=4.7 && <5
-    , file-proxy
-  default-language: Haskell2010
-
 test-suite file-proxy-test
   type: exitcode-stdio-1.0
   main-is: Spec.hs
@@ -105,7 +88,6 @@ test-suite file-proxy-test
     , bytestring
     , directory
     , file-proxy
-    , file-proxy-web-assets
     , filepath
     , hspec
     , temporary

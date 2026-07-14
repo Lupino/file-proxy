@@ -1,0 +1,54 @@
+name: file-proxy-web
+version: 1.2.0.0
+license: BSD3
+
+dependencies:
+- base >= 4.7 && < 5
+
+library:
+  source-dirs: src
+  exposed-modules:
+  - FileProxy.Web
+  - FileProxy.WebAssets
+  dependencies:
+  - file-proxy
+  - bytestring
+  - base64-bytestring
+  - aeson
+  - base16-bytestring
+  - cryptohash-sha256
+  - directory
+  - filepath
+  - http-types
+  - metro
+  - metro-socket
+  - metro-transport-crypto
+  - optparse-applicative
+  - periodic-client
+  - periodic-common
+  - scotty
+  - time
+  - unliftio
+  - warp
+
+executables:
+  file-proxy-web:
+    main:                file-proxy-web.hs
+    source-dirs:         app
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    dependencies:
+    - file-proxy-web
+
+tests:
+  file-proxy-web-test:
+    main:                Spec.hs
+    source-dirs:         test
+    dependencies:
+    - file-proxy-web
+    - bytestring
+    - directory
+    - filepath
+    - hspec

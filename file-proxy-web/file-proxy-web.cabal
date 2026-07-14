@@ -1,0 +1,69 @@
+cabal-version: 1.12
+
+-- This file has been generated from package.yaml by hpack version 0.39.1.
+--
+-- see: https://github.com/sol/hpack
+
+name:           file-proxy-web
+version:        1.2.0.0
+license:        BSD3
+build-type:     Simple
+
+library
+  exposed-modules:
+      FileProxy.Web
+      FileProxy.WebAssets
+  other-modules:
+      Paths_file_proxy_web
+  hs-source-dirs:
+      src
+  build-depends:
+      aeson
+    , base >=4.7 && <5
+    , base16-bytestring
+    , base64-bytestring
+    , bytestring
+    , cryptohash-sha256
+    , directory
+    , file-proxy
+    , filepath
+    , http-types
+    , metro
+    , metro-socket
+    , metro-transport-crypto
+    , optparse-applicative
+    , periodic-client
+    , periodic-common
+    , scotty
+    , time
+    , unliftio
+    , warp
+  default-language: Haskell2010
+
+executable file-proxy-web
+  main-is: file-proxy-web.hs
+  other-modules:
+      Paths_file_proxy_web
+  hs-source-dirs:
+      app
+  ghc-options: -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+      base >=4.7 && <5
+    , file-proxy-web
+  default-language: Haskell2010
+
+test-suite file-proxy-web-test
+  type: exitcode-stdio-1.0
+  main-is: Spec.hs
+  other-modules:
+      Paths_file_proxy_web
+  hs-source-dirs:
+      test
+  build-depends:
+      base >=4.7 && <5
+    , bytestring
+    , directory
+    , file-proxy-web
+    , filepath
+    , hspec
+  default-language: Haskell2010

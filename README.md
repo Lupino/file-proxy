@@ -118,7 +118,7 @@ Build the React client and start the HTTP gateway after starting a
 `file-proxy` worker:
 
 ```bash
-cd web
+cd file-proxy-web
 npm install
 npm run build
 cd ..
@@ -126,10 +126,10 @@ stack build --fast
 stack exec file-proxy-web
 ```
 
-The `file-proxy-web` binary embeds the Vite `web/dist` output at compile time,
-so the runtime does not need the `web/` directory. The gateway serves the
+The `file-proxy-web` binary embeds the Vite `file-proxy-web/dist` output at
+compile time, so the runtime does not need the frontend source directory. The gateway serves the
 built client at `http://127.0.0.1:8080/` and proxies HTTP requests to the
-Periodic worker. During development, run `npm run dev` in `web/`; Vite proxies
+Periodic worker. During development, run `npm run dev` in `file-proxy-web/`; Vite proxies
 `/api` to port 8080.
 
 The gateway accepts command-line options and environment defaults. Supported

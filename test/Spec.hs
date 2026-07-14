@@ -9,12 +9,10 @@ import qualified Data.Aeson.KeyMap    as KeyMap
 import qualified Data.ByteString      as BS
 import qualified Data.Text            as Text
 import           FileProxy.Client
-import           FileProxy.WebAssets (embeddedFiles)
 import           FileProxy.Worker
-import           System.Directory     (doesDirectoryExist, doesFileExist, getFileSize, listDirectory, removeFile)
-import           System.FilePath      ((</>), makeRelative)
+import           System.Directory     (doesFileExist, getFileSize, removeFile)
+import           System.FilePath      ((</>))
 import           System.IO.Temp       (withSystemTempDirectory)
-import           Data.List            (sort)
 import           Test.Hspec
 
 main :: IO ()
@@ -26,13 +24,6 @@ main = hspec do
       resolveUserPath root "../secret" `shouldSatisfy` isLeft
       resolveUserPath root ".file-proxy/uploads/x" `shouldSatisfy` isLeft
       resolveUserPath root "a/b.txt" `shouldBe` Right (root </> "a/b.txt")
-
-  describe "embedded web assets" do
-    it "matches the generated frontend distribution" do
-      assetPaths <- recursiveFiles "web-assets/dist"
-      let expected = map (makeRelative "web-assets/dist") assetPaths
-      map fst embeddedFiles `shouldBe` expected
-      mapM BS.readFile assetPaths `shouldReturn` map snd embeddedFiles
 
   describe "single-shot file APIs" do
     it "writes a file and returns its sha256" do
@@ -357,16 +348,3 @@ assertLeftError code rsp =
 unwrapRight :: Either ApiError BS.ByteString -> BS.ByteString
 unwrapRight (Right bs) = bs
 unwrapRight (Left e)   = error $ "unexpected error: " ++ show e
-
-recursiveFiles :: FilePath -> IO [FilePath]
-recursiveFiles directory = do
-  entries <- sort <$> listDirectory directory
-  paths <- mapM visit entries
-  pure $ concat paths
-  where
-    visit entry = do
-      let path = directory </> entry
-      isDirectory <- doesDirectoryExist path
-      if isDirectory
-        then recursiveFiles path
-        else pure [path]
