@@ -8,6 +8,13 @@ export type Entry = {
   children?: Entry[];
 };
 
+export type DownloadInfo = {
+  path: string;
+  size: number;
+  sha256: string;
+  modifiedAt: string;
+};
+
 type ApiResponse<T> = {
   ok: boolean;
   error?: { code: string; message: string };
@@ -96,6 +103,9 @@ export function downloadUrl(path: string) {
   return `/api/download/info?path=${encodeURIComponent(path)}`;
 }
 
+export const downloadInfo = (path: string) =>
+  request<DownloadInfo>(downloadUrl(path));
+
 export async function downloadFile(path: string, name: string) {
   const blob = await fetchFileBlob(path);
   const objectUrl = URL.createObjectURL(blob);
@@ -110,7 +120,7 @@ export async function fetchFileBlob(
   path: string,
   onProgress?: (value: number) => void,
 ) {
-  const info = await request<{ size: number }>(downloadUrl(path));
+  const info = await downloadInfo(path);
   const chunks: BlobPart[] = [];
   const chunkSize = 1024 * 1024;
   let downloaded = 0;

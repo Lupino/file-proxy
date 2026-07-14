@@ -1,13 +1,28 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
+import CodeMirror from "@uiw/react-codemirror";
+import { oneDark } from "@codemirror/theme-one-dark";
 import { useFileStore } from "./store";
-import { downloadFile, fetchFileBlob, list } from "./api";
-import type { Entry } from "./api";
+import { downloadInfo, fetchFileBlob, list, uploadFile } from "./api";
+import type { DownloadInfo, Entry } from "./api";
+import {
+  decodeTextFile,
+  isEditableTextPath,
+  languageExtensions,
+  MAX_TEXT_FILE_SIZE,
+} from "./editor";
 import type { UploadTask } from "./store";
 import "./index.css";
 
 type SortKey = "name" | "modified" | "size";
 type Preview = { name: string; progress: number; url?: string; ready: boolean };
+type Download = { name: string; progress: number; ready: boolean };
+type TextEditor = {
+  entry: Entry;
+  info: DownloadInfo;
+  initialValue: string;
+  value: string;
+};
 
 function App() {
   const {
@@ -27,6 +42,11 @@ function App() {
     closeUploadPanel,
   } = useFileStore();
   const [preview, setPreview] = React.useState<Preview | null>(null);
+  const [downloadProgress, setDownloadProgress] =
+    React.useState<Download | null>(null);
+  const [editor, setEditor] = React.useState<TextEditor | null>(null);
+  const [editorLoading, setEditorLoading] = React.useState<Entry | null>(null);
+  const [editorSaving, setEditorSaving] = React.useState(false);
   const previewRequestId = React.useRef(0);
   const [activeAction, setActiveAction] = React.useState<string | null>(null);
   const [uploadNotice, setUploadNotice] = React.useState<string | null>(null);
@@ -126,9 +146,22 @@ function App() {
   };
   const download = async (entry: Entry) => {
     setActiveAction(`download:${entry.path}`);
+    setDownloadProgress({ name: entry.name, progress: 0, ready: false });
     try {
-      await downloadFile(entry.path, entry.name);
+      const blob = await fetchFileBlob(entry.path, (progress) =>
+        setDownloadProgress((current) =>
+          current ? { ...current, progress } : null,
+        ),
+      );
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = entry.name;
+      anchor.click();
+      URL.revokeObjectURL(url);
+      setDownloadProgress({ name: entry.name, progress: 1, ready: true });
     } catch (downloadError) {
+      setDownloadProgress(null);
       useFileStore.setState({
         error:
           downloadError instanceof Error
@@ -143,6 +176,83 @@ function App() {
     previewRequestId.current += 1;
     if (preview?.url) URL.revokeObjectURL(preview.url);
     setPreview(null);
+  };
+  const loadEditor = async (entry: Entry, confirmDiscard = false) => {
+    if (
+      confirmDiscard &&
+      editor &&
+      editor.value !== editor.initialValue &&
+      !window.confirm("Discard unsaved changes and reload the remote file?")
+    )
+      return;
+    setActiveAction(`edit:${entry.path}`);
+    setEditorLoading(entry);
+    try {
+      const info = await downloadInfo(entry.path);
+      if (info.size > MAX_TEXT_FILE_SIZE)
+        throw new Error("text files larger than 5 MiB can only be downloaded");
+      const blob = await fetchFileBlob(entry.path);
+      const value = decodeTextFile(await blob.arrayBuffer());
+      setEditor({ entry, info, initialValue: value, value });
+    } catch (editorError) {
+      useFileStore.setState({
+        error:
+          editorError instanceof Error
+            ? editorError.message
+            : "could not open text file",
+      });
+    } finally {
+      setEditorLoading(null);
+      setActiveAction(null);
+    }
+  };
+  const closeEditor = () => {
+    if (
+      editor &&
+      editor.value !== editor.initialValue &&
+      !window.confirm("Discard unsaved changes?")
+    )
+      return;
+    setEditor(null);
+  };
+  const saveEditor = async () => {
+    if (!editor) return;
+    const savedValue = editor.value;
+    setEditorSaving(true);
+    try {
+      const current = await downloadInfo(editor.entry.path);
+      if (
+        current.sha256 !== editor.info.sha256 &&
+        !window.confirm(
+          "This file changed on the server after you opened it. Overwrite the remote version?",
+        )
+      )
+        return;
+      const file = new File([savedValue], editor.entry.name, {
+        type: "text/plain;charset=utf-8",
+      });
+      await uploadFile(file, editor.entry.path, () => undefined);
+      const updatedInfo = await downloadInfo(editor.entry.path);
+      setEditor((currentEditor) =>
+        currentEditor
+          ? {
+              ...currentEditor,
+              info: updatedInfo,
+              initialValue: savedValue,
+            }
+          : null,
+      );
+      await open(path);
+    } catch (saveError) {
+      useFileStore.setState({
+        error:
+          saveError instanceof Error
+            ? saveError.message
+            : "could not save file",
+      });
+    } finally {
+      setEditorSaving(false);
+    }
   };
   const submitMove = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -337,6 +447,7 @@ function App() {
                     setMoveDirectory("");
                   }}
                   preview={showPreview}
+                  edit={loadEditor}
                   download={download}
                   busy={busy !== null || activeAction !== null}
                   activeAction={activeAction}
@@ -384,7 +495,168 @@ function App() {
         />
       )}
       {preview && <PreviewModal preview={preview} close={closePreview} />}
+      {downloadProgress && (
+        <DownloadModal
+          download={downloadProgress}
+          close={() => setDownloadProgress(null)}
+        />
+      )}
+      {(editor || editorLoading) && (
+        <EditorModal
+          editor={editor}
+          loadingEntry={editorLoading}
+          saving={editorSaving}
+          close={closeEditor}
+          reload={() => editor && void loadEditor(editor.entry, true)}
+          save={() => void saveEditor()}
+          setValue={(value) =>
+            setEditor((current) => current && { ...current, value })
+          }
+        />
+      )}
     </>
+  );
+}
+
+function DownloadModal({
+  download,
+  close,
+}: {
+  download: Download;
+  close: () => void;
+}) {
+  const progress = Math.round(download.progress * 100);
+  return (
+    <div
+      className="fixed inset-0 z-30 grid place-items-center bg-slate-950/75 p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Download ${download.name}`}
+    >
+      <div className="w-full max-w-md rounded-xl bg-white p-5 shadow-2xl">
+        <div className="flex items-center gap-3 text-sm font-medium text-slate-700">
+          {download.ready ? (
+            <span className="grid h-7 w-7 place-items-center rounded-full bg-emerald-100 text-emerald-600">
+              ✓
+            </span>
+          ) : (
+            <Spinner large />
+          )}
+          {download.ready ? "Download started" : "Downloading file"}
+        </div>
+        <p
+          className="mt-2 truncate text-sm text-slate-500"
+          title={download.name}
+        >
+          {download.name}
+        </p>
+        <div className="mt-5 h-2 overflow-hidden rounded-full bg-slate-100">
+          <div
+            className="h-full rounded-full bg-blue-600 transition-all duration-200"
+            style={{ width: `${progress}%` }}
+          />
+        </div>
+        <p className="mt-2 text-right text-sm tabular-nums text-slate-500">
+          {progress}%
+        </p>
+        {download.ready && (
+          <div className="mt-5 flex justify-end">
+            <button className="button-primary" onClick={close}>
+              Done
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function EditorModal({
+  editor,
+  loadingEntry,
+  saving,
+  close,
+  reload,
+  save,
+  setValue,
+}: {
+  editor: TextEditor | null;
+  loadingEntry: Entry | null;
+  saving: boolean;
+  close: () => void;
+  reload: () => void;
+  save: () => void;
+  setValue: (value: string) => void;
+}) {
+  const name = editor?.entry.name ?? loadingEntry?.name ?? "text file";
+  const dirty = editor ? editor.value !== editor.initialValue : false;
+  return (
+    <div
+      className="fixed inset-0 z-30 flex items-center justify-center bg-slate-950/70 p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Edit ${name}`}
+    >
+      <div className="flex h-[90vh] w-full max-w-6xl flex-col overflow-hidden rounded-xl bg-white shadow-2xl">
+        <div className="flex items-center justify-between gap-4 border-b border-slate-200 px-5 py-3">
+          <div className="min-w-0">
+            <h2 className="truncate font-semibold text-slate-900" title={name}>
+              {name}
+            </h2>
+            {editor && (
+              <p className="text-xs text-slate-500">
+                {formatBytes(editor.info.size)}{" "}
+                {dirty ? "· Unsaved changes" : "· Saved"}
+              </p>
+            )}
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <button
+              className="button-quiet"
+              disabled={!editor || saving}
+              onClick={reload}
+            >
+              Reload
+            </button>
+            <button
+              className="button-primary"
+              disabled={!editor || saving || !dirty}
+              onClick={save}
+            >
+              {saving ? (
+                <>
+                  <Spinner /> Saving…
+                </>
+              ) : (
+                "Save"
+              )}
+            </button>
+            <button
+              className="text-2xl leading-none text-slate-400 hover:text-slate-700 disabled:opacity-40"
+              disabled={saving}
+              aria-label="Close editor"
+              onClick={close}
+            >
+              ×
+            </button>
+          </div>
+        </div>
+        {editor ? (
+          <CodeMirror
+            className="min-h-0 flex-1 overflow-auto text-sm"
+            value={editor.value}
+            height="100%"
+            theme={oneDark}
+            extensions={languageExtensions(editor.entry.name)}
+            onChange={setValue}
+          />
+        ) : (
+          <div className="flex flex-1 items-center justify-center gap-3 text-sm text-slate-500">
+            <Spinner large /> Loading text file…
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -746,6 +1018,7 @@ function Row({
   remove,
   move,
   preview,
+  edit,
   download,
   busy,
   activeAction,
@@ -755,21 +1028,28 @@ function Row({
   remove: (entry: Entry) => Promise<void>;
   move: (entry: Entry) => void;
   preview: (entry: Entry) => Promise<void>;
+  edit: (entry: Entry) => Promise<void>;
   download: (entry: Entry) => Promise<void>;
   busy: boolean;
   activeAction: string | null;
 }) {
   const isDirectory = entry.type === "directory";
   const image = isImageEntry(entry);
+  const editableText = entry.type === "file" && isEditableTextPath(entry.path);
   const previewing = activeAction === `preview:${entry.path}`;
+  const editing = activeAction === `edit:${entry.path}`;
   const downloading = activeAction === `download:${entry.path}`;
   return (
     <div className="file-row group">
       <button
-        className={`flex min-w-0 items-center gap-3 text-left ${!isDirectory && !image ? "cursor-default" : ""}`}
+        className={`flex min-w-0 items-center gap-3 text-left ${!isDirectory && !image && !editableText ? "cursor-default" : ""}`}
         disabled={busy}
         onClick={() =>
-          isDirectory ? void open(entry.path) : image && void preview(entry)
+          isDirectory
+            ? void open(entry.path)
+            : image
+              ? void preview(entry)
+              : editableText && void edit(entry)
         }
       >
         <FileIcon entry={entry} />
@@ -784,7 +1064,9 @@ function Row({
               ? "Folder"
               : image
                 ? "Image · click to preview"
-                : extensionLabel(entry.name)}
+                : editableText
+                  ? "Text · click to edit"
+                  : extensionLabel(entry.name)}
           </span>
         </span>
       </button>
@@ -808,6 +1090,22 @@ function Row({
               </>
             ) : (
               "Preview"
+            )}
+          </button>
+        )}
+        {editableText && (
+          <button
+            className="action-button"
+            disabled={busy}
+            title="Edit text file"
+            onClick={() => void edit(entry)}
+          >
+            {editing ? (
+              <>
+                <Spinner /> Opening…
+              </>
+            ) : (
+              "Edit"
             )}
           </button>
         )}
