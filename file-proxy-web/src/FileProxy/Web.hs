@@ -145,6 +145,7 @@ routes opts = do
     uploadId <- captureParam "uploadId"
     jsonRpcRaw opts "upload-abort" uploadId LB.empty
   get "/" $ staticFile opts "index.html"
+  get "/favicon.svg" $ staticFile opts "favicon.svg"
   get "/assets/:name" $ do
     name <- captureParam "name"
     staticFile opts ("assets" </> name)
