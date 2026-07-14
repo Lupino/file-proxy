@@ -27,8 +27,9 @@ endif
 endif
 
 OUT = file-proxy file-proxy-client file-proxy-web
-WEB_ASSETS_GENERATOR = web-assets/generate-web-assets.js
-WEB_ASSETS_MODULE = web-assets/src/FileProxy/WebAssets.hs
+.PHONY: $(OUT)
+WEB_ASSETS_GENERATOR = file-proxy-web/generate-web-assets.js
+WEB_ASSETS_MODULE = file-proxy-web/src/FileProxy/WebAssets.hs
 
 BUNDLE_BIN = dist/bundle/bin
 BUNDLE_LIB = dist/bundle/lib/file-proxy
@@ -57,8 +58,11 @@ dist/$(PLATFORM)/%: dist/$(PLATFORM)
 	fi
 	chmod -w $@
 
-$(OUT):
-	PKG=file-proxy make dist/$(PLATFORM)/$@$(EXT)
+file-proxy file-proxy-client:
+	$(MAKE) PKG=file-proxy dist/$(PLATFORM)/$@$(EXT)
+
+file-proxy-web:
+	$(MAKE) PKG=file-proxy-web dist/$(PLATFORM)/$@$(EXT)
 
 package: $(OUT)
 	@if [ "$(SYSTEM)" = "windows" ]; then $(MAKE) windows-verify; fi
@@ -69,7 +73,7 @@ package: $(OUT)
 	fi
 
 web-assets-refresh:
-	cd web-assets && npm run build
+	cd file-proxy-web && npm run build
 
 check-web-assets:
 	@tmp=$$(mktemp); \
