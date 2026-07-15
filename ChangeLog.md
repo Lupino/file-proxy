@@ -2,6 +2,30 @@
 
 ## Unreleased changes
 
+## v1.2.1.0 - 2026-07-15
+
+### Added
+
+- Add remote text editing to `file-proxy-web`, with CodeMirror syntax support
+  for common file types, download progress, binary and 5 MiB size safeguards,
+  unsaved-change prompts, and remote-change confirmation before saving.
+- Add `file-proxy-web-standalone`, which serves the embedded web client and
+  operates directly on a configured local filesystem root without a Periodic
+  worker.
+- Add standalone HTTP endpoints for browsing, file metadata, downloads,
+  resumable uploads, and filesystem mutations, with integration coverage for
+  safe paths, disabled deletion, and verified chunk transfer.
+
+### Fixed
+
+- Serve the embedded favicon from the standalone web server.
+
+### Changed
+
+- Refresh the embedded web assets and update web build dependencies for the
+  text editor.
+- Remove the obsolete release script.
+
 ## v1.2.0.0 - 2026-07-14
 
 ### Added
